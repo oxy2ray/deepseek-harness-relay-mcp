@@ -2,14 +2,14 @@ import { HarnessGatewayFacade } from './harness-gateway-facade.js'
 import { HttpHarnessGateway } from './http-harness-gateway.js'
 import { InProcessDispatchHandler } from './in-process-dispatch-handler.js'
 import { InProcessHarnessGateway, type InProcessApiClientPort } from './in-process-harness-gateway.js'
-import { TypertHarnessGateway, type TypertGatewayPort } from './typert-harness-gateway.js'
+import { TypertHarnessGateway, type TypertGatewayPort, type TypertPeerScope } from './typert-harness-gateway.js'
 
 export { HarnessGatewayFacade } from './harness-gateway-facade.js'
 export { HostRpcError } from './host-errors.js'
 export { InProcessDispatchHandler } from './in-process-dispatch-handler.js'
 export { InProcessHarnessGateway } from './in-process-harness-gateway.js'
 export { TypertHarnessGateway } from './typert-harness-gateway.js'
-export type { TypertGatewayPort } from './typert-harness-gateway.js'
+export type { TypertGatewayPort, TypertPeerScope } from './typert-harness-gateway.js'
 export type { InProcessApiClientPort, InProcessRpcResponse } from './in-process-harness-gateway.js'
 export type {
   HarnessGatewayProvider,
@@ -49,11 +49,12 @@ export function createInProcessHarnessGateway(
   return new HarnessGatewayFacade(new InProcessHarnessGateway(client, permissions, dispatchHandler))
 }
 
-/** Create the Harness 0.1.2 embedded gateway over the Host Typert dispatcher. */
+/** Create an embedded gateway speaking for a Host-created, lifecycle-scoped Peer. */
 export function createTypertHarnessGateway(
   gateway: TypertGatewayPort,
   permissions: import('../permission-gateway/index.js').PermissionGateway,
+  peer: TypertPeerScope,
   hostDescription?: Readonly<Record<string, unknown>>,
 ): HarnessGatewayFacade {
-  return new HarnessGatewayFacade(new TypertHarnessGateway(gateway, permissions, hostDescription))
+  return new HarnessGatewayFacade(new TypertHarnessGateway(gateway, permissions, peer, hostDescription))
 }

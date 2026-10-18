@@ -1,4 +1,5 @@
 export const REQUIRED_HARNESS_SERVICES = [
+  'connection',
   'agents',
   'typertGateway',
   'webServer',

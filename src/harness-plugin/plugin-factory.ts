@@ -10,6 +10,7 @@ import {
 
 export const name = HARNESS_PLUGIN_NAME
 export const inject = [
+  'connection',
   'agents',
   'typertGateway',
   'webServer',
@@ -22,6 +23,7 @@ export const inject = [
 ] as const
 
 export interface HarnessPluginContext {
+  connection: unknown
   typertGateway: unknown
   webServer: unknown
   sessions: unknown

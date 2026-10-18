@@ -14,6 +14,7 @@ import { EventMonitoringFacade, type EventMonitoringNotice } from './event-monit
 import {
   createTypertHarnessGateway,
   type TypertGatewayPort,
+  type TypertPeerScope,
 } from './harness-gateway/index.js'
 import {
   createHarnessPlugin,
@@ -84,6 +85,7 @@ interface NativeWebServer {
 interface NativePermissionPresets extends InProcessPermissionPresetPort<NativeSession> {}
 
 type NativeHarnessContext = Context & HarnessPluginContext & {
+  connection: { createPeer(options: { principal: { kind: 'owner' }; interactions: 'none' }): TypertPeerScope }
   typertGateway: TypertGatewayPort
   webServer: NativeWebServer
   sessions: NativeSessionStore
@@ -107,7 +109,8 @@ const plugin = createHarnessPlugin<NativeHarnessContext>({
       ctx.permissionPresets,
     )
     const permissions = new PermissionGatewayFacade(permissionProvider)
-    const gateway = createTypertHarnessGateway(ctx.typertGateway, permissions)
+    const peer = ctx.connection.createPeer({ principal: { kind: 'owner' }, interactions: 'none' })
+    const gateway = createTypertHarnessGateway(ctx.typertGateway, permissions, peer)
     return { gateway, permissions }
   },
   async startAuthority(ctx, config, adapters, options) {

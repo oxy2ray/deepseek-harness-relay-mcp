@@ -16,14 +16,25 @@ import type {
   WorkspaceView,
 } from './types.js'
 
+/** Host-created Peer; the gateway forwards it unchanged and never fabricates identity. */
+export interface TypertPeerScope {
+  readonly id: string
+  readonly ctx: unknown
+  readonly principal: { readonly kind: string }
+  readonly signal: AbortSignal
+  readonly interactions: 'answer' | 'none'
+  dispose(): Promise<void>
+}
+
 interface TypertInvokeRequest {
   namespace: string
   method: string
   args: Readonly<Record<string, unknown>>
+  peer: TypertPeerScope
   signal?: AbortSignal
 }
 
-/** Structural view of Harness 0.1.2's Host-side Typert Gateway. */
+/** Structural view of the Host-side Typert Gateway with explicit caller identity. */
 export interface TypertGatewayPort {
   invoke(request: TypertInvokeRequest): Promise<unknown>
   stream(request: TypertInvokeRequest): Promise<AsyncIterable<unknown>>
@@ -66,6 +77,7 @@ export class TypertHarnessGateway implements HarnessGatewayProvider {
   constructor(
     private readonly gateway: TypertGatewayPort,
     private readonly permissions: PermissionGateway,
+    private readonly peer: TypertPeerScope,
     private readonly hostDescription: Readonly<Record<string, unknown>> = {
       mode: 'embedded',
       api: 'typert-gateway',
@@ -216,7 +228,7 @@ export class TypertHarnessGateway implements HarnessGatewayProvider {
     args: Readonly<Record<string, unknown>>,
   ): Promise<T> {
     try {
-      return await this.gateway.invoke({ namespace, method, args }) as T
+      return await this.gateway.invoke({ namespace, method, args, peer: this.peer }) as T
     } catch (error: unknown) {
       throw typertGatewayError(operation, error)
     }
@@ -231,7 +243,7 @@ export class TypertHarnessGateway implements HarnessGatewayProvider {
     const controller = new AbortController()
     let iterator: AsyncIterator<unknown> | undefined
     try {
-      const stream = await this.gateway.stream({ namespace, method, args, signal: controller.signal })
+      const stream = await this.gateway.stream({ namespace, method, args, peer: this.peer, signal: controller.signal })
       iterator = stream[Symbol.asyncIterator]()
       const first = await iterator.next()
       if (first.done) {

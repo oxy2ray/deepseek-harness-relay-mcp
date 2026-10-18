@@ -68,7 +68,7 @@ Harness Relay MCP 是独立的第三方项目，并非由 DeepSeek AI 开发、�
 ## 运行要求
 
 - Node.js `^22.19` 或 `>=24`。
-- 内部模式要求 DeepSeek Harness `>=0.1.3-alpha.2 <0.2.0`、`web` profile，并只允许 `127.0.0.1` 绑定。该最低版本已包含上游 Windows 后台子进程修复，模型调用 `rg` 等普通命令时不会再弹出短暂控制台窗口。Relay 0.2.6 及更早版本依赖已移除的 rc.7 ApiProxy 接口，无法在此 Harness 版本线加载。
+- Relay 0.2.19 内部模式要求 DeepSeek Harness `>=0.2.1-alpha.5 <0.3.0`、`web` profile，并只允许 `127.0.0.1` 绑定。使用新版 Typert 网关要求的公开 connection Peer API；须同时更新内嵌 bundle 与客户端代理并重启 Host，旧版 Relay 未传递必需的 Peer。
 - 独立兼容模式要求已在本机回环 HTTP 地址运行的 DeepSeek Harness Web Host。
 - 目标工作区必须已在 Harness 中登记，或属于明确配置的允许根目录。
 

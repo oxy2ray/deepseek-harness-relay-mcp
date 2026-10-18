@@ -14,6 +14,7 @@ test('Cordis plugin factory exposes native injects and disposes infrastructure w
   const lifecycle: string[] = []
   let installer: (() => Promise<() => Promise<void>> | AsyncIterable<() => void | Promise<void>, void, void>) | undefined
   const ctx: HarnessPluginContext = {
+    connection: {},
     typertGateway: {},
     webServer: {},
     sessions: {},
@@ -48,6 +49,7 @@ test('Cordis plugin factory exposes native injects and disposes infrastructure w
 
   assert.equal(plugin.name, 'harness-relay-mcp')
   assert.deepEqual(plugin.inject, [
+    'connection',
     'agents',
     'typertGateway',
     'webServer',
@@ -85,6 +87,7 @@ test('Cordis plugin factory exposes native injects and disposes infrastructure w
 test('Cordis plugin factory exposes an abort disposer before authority startup settles', async () => {
   let installer: (() => Promise<() => Promise<void>> | AsyncIterable<() => void | Promise<void>, void, void>) | undefined
   const ctx: HarnessPluginContext = {
+    connection: {},
     typertGateway: {}, webServer: {}, sessions: {}, sessionController: {},
     workspaceController: {}, settingsController: {}, agentPresets: {}, permissionPresets: {},
     effect(install) { installer = install; return () => {} },
@@ -127,7 +130,7 @@ test('headless profile preflight blocks before profile mutation', () => {
   assert.deepEqual(preflightHarnessProfile({
     profile: 'web',
     availableServices: [
-      'agents', 'typertGateway', 'sessions', 'sessionController', 'workspaceController',
+      'connection', 'agents', 'typertGateway', 'sessions', 'sessionController', 'workspaceController',
       'settingsController', 'agentPresets', 'permissionPresets',
     ],
   }), {
@@ -139,7 +142,7 @@ test('headless profile preflight blocks before profile mutation', () => {
   assert.equal(preflightHarnessProfile({
     profile: 'web',
     availableServices: [
-      'agents', 'typertGateway', 'webServer', 'sessions', 'sessionController', 'workspaceController',
+      'connection', 'agents', 'typertGateway', 'webServer', 'sessions', 'sessionController', 'workspaceController',
       'settingsController', 'agentPresets', 'permissionPresets',
     ],
   }).ready, true)
