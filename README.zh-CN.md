@@ -528,6 +528,6 @@ MIT
 
 ## 持久唤醒（连接现有 Codex）
 
-标准代理可通过持久收集器连接现有 Codex daemon。配置授权工作区根目录的 `autoBind` 策略后，新对话根据宿主元数据自动登记，无需逐个配置对话。0.2.22 已通过真实新对话的派发、确认订阅、自动唤醒和完整结果读取，全程零次 `wait_run`。投递需要目标对话空闲：先前唤醒回合仍在工作时，后续完成通知会排队。回退使用的 `wait_run` 默认只返回精简状态，完整结果通过 `get_run` 获取。配置、实测证据和回滚见 [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md)。没有显式配置时保留等待流程。启用唤醒不扩大任务权限。
+标准代理可通过持久收集器连接现有 Codex daemon。配置授权工作区根目录的 `autoBind` 策略后，新对话根据宿主元数据自动登记，无需逐个配置对话。0.2.22 已通过真实新对话的派发、确认订阅、自动唤醒和完整结果读取，全程零次 `wait_run`。0.2.23 显式开启 `continueAutomaticTurns` 后，后续通知可通过原生接口进入同一个仍在工作的 Relay 自动回合，已用两项真实终态任务的受控重放验证。用户发起的其他回合和审批等待仍保持排队；此开关默认关闭。回退使用的 `wait_run` 默认只返回精简状态，完整结果通过 `get_run` 获取。配置、实测证据和回滚见 [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md)。没有显式配置时保留等待流程。启用唤醒不扩大任务权限。
 
 启动和日常操作见 [快速使用](EVENT_WAKE_QUICKSTART.md)。配置、控制与回滚见 [实现说明](EVENT_WAKE_IMPLEMENTATION.md)，复用现有服务见 [显式配置](EVENT_WAKE_SHARED_RELAY.md)，证据见 [验证记录](EVENT_WAKE_VALIDATION.md)。支持独立认证或只读挂载当前认证；准备脚本不会复制凭据。

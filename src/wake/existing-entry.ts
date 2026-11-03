@@ -89,7 +89,9 @@ try {
       const initialized = await client.initialize()
       if (!initialized.codexHome) throw new Error('daemon did not publish its identity')
       const host = await ExistingCodexHost.attach({ client, socket: config.socket,
-        codexHome: initialized.codexHome, uid: process.getuid?.() ?? 0, bindings: config.bindings })
+        codexHome: initialized.codexHome, uid: process.getuid?.() ?? 0, bindings: config.bindings,
+        // Operator opt-in only; the production config stays root-owned and unread by tests.
+        continueAutomaticTurns: wakeConfig.continueAutomaticTurns === true })
       for (const binding of config.bindings) {
         const old = (await outbox.store.read()).bindings.find(b => b.bindingId === binding.bindingId)
         if (old) {

@@ -14,6 +14,9 @@ const schema = z.object({
     bindingId: identifier, threadId: z.uuid(), workspace: absolute,
     relayWorkspace: absolute.optional(), expiresAt: z.number().int().positive(),
   }).strict()).max(100),
+  // Optional operator opt-in: deliver later pending events into one still in-progress
+  // automatic turn instead of waiting for it to end. Absence/false keeps the idle-only path.
+  continueAutomaticTurns: z.boolean().optional(),
   // Optional opt-in for auto-binding newly opened conversations. Its absence keeps
   // the file strictly static: only the explicit `bindings` list is ever attached.
   autoBind: z.object({

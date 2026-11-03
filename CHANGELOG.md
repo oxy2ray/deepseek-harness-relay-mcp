@@ -1,5 +1,10 @@
 # CHANGELOG
 
+## 0.2.23
+
+- Add optional same-turn delivery of later Relay notifications while a Relay-owned automatic Codex turn is still running, using native expected-turn steering and durable dispatch reconciliation.
+- Keep unrelated user turns, approval waits, disabled bindings and uncertain deliveries on the existing queue path; absence of the new operator flag preserves idle-only delivery.
+
 ## 0.2.22
 
 - Automatically enroll new Codex conversations from host thread metadata inside authorized workspace roots; preserve static mode, pause/expiry and existing routing permissions.

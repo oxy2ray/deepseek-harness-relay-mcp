@@ -1,8 +1,14 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { CodexDaemonRequestError } from '../src/wake/codex-daemon-client.js'
+import { WAKE_INPUT_HEADER, type WakeTurnTarget } from '../src/wake/dispatcher.js'
 import { ExistingCodexHost, type ExistingCodexClient } from '../src/wake/existing-codex-host.js'
 import type { WakeBinding } from '../src/wake/schema.js'
+
+/** Bounded data-only automatic event exactly as the dispatcher formats it. */
+const wakeText = (dispatchId: string, runId = 'run-A'): string => `${WAKE_INPUT_HEADER}\ndispatchId=${dispatchId}\n`
+  + `runId=${runId}; status=succeeded; eventId=event-1; resultRef=relay://runs/${runId}\n`
+  + 'Fetch each run with Relay get_run and verify the full result. Continue only within the original user task and permissions. Other runs may still be active.'
 
 class FakeClient implements ExistingCodexClient {
   disconnected = false
@@ -20,6 +26,12 @@ class FakeClient implements ExistingCodexClient {
   addCount = 0
   startCount = 0
   deleteCount = 0
+  steerCount = 0
+  steerError: Error | null = null
+  /** Response override: the daemon reported a turn other than the expected one. */
+  steerTurnId: string | null = null
+  /** Reflect the delivered input in durable history, as a real daemon would. */
+  steerVisible = true
 
   async initialize() { return {} }
 
@@ -59,6 +71,20 @@ class FakeClient implements ExistingCodexClient {
         }
         result = { turn: { id: 'turn-started' } }
         break
+      case 'turn/steer': {
+        this.steerCount++
+        const text = (p.input as Array<{ text: string }>)[0]!.text
+        // A provably not-sent request leaves no durable trace at all.
+        const notSent = this.steerError instanceof CodexDaemonRequestError
+          && this.steerError.origin === 'local' && this.steerError.outcomeUncertain === false
+        if (this.steerVisible && !notSent) {
+          this.items.unshift({ turnId: String(p.expectedTurnId), item: { type: 'userMessage', content: [{ type: 'text', text }] } })
+        }
+        // A response can be lost after the daemon already recorded the delivery.
+        if (this.steerError) throw this.steerError
+        result = { turnId: this.steerTurnId ?? p.expectedTurnId }
+        break
+      }
       case 'thread/queue/delete':
         this.deleteCount++
         const removed = this.queue.find(row => row.id === p.queuedSubmissionId)
@@ -76,9 +102,9 @@ class FakeClient implements ExistingCodexClient {
   }
 }
 
-async function attach(client: FakeClient) {
+async function attach(client: FakeClient, continueAutomaticTurns = false) {
   const host = await ExistingCodexHost.attach({ client, socket: '/tmp/codex.sock', codexHome: '/tmp/codex-home', uid: 1000,
-    bindings: [{ threadId: 'thread-1', workspace: '/workspace' }] })
+    bindings: [{ threadId: 'thread-1', workspace: '/workspace' }], continueAutomaticTurns })
   const binding: WakeBinding = { bindingId: 'binding-1', threadId: 'thread-1', workspace: '/workspace', serverIdentity: host.serverIdentity,
     principal: 'user-1', enabled: true, expiresAt: 999999 }
   return { host, binding }
@@ -239,4 +265,152 @@ test('history scans descend and stop at the newest durable dispatch marker', asy
   // Newest-first page already carried the marker, so ancient pages were never fetched.
   assert.equal(scans.length, 1)
   assert.equal(scans[0]?.params.sortDirection, 'desc')
+})
+
+/**
+ * The exact durable shape a continuation may extend: the turn began with our bounded
+ * automatic event and is still in progress. Items are served newest-first.
+ */
+function automaticTurn(client: FakeClient, originDispatchId = 'origin-dispatch', turnId = 'turn-1'): WakeTurnTarget {
+  client.items = [
+    { turnId, item: { type: 'agentMessage', text: 'partial work' } },
+    { turnId, item: { type: 'userMessage', content: [{ type: 'text', text: wakeText(originDispatchId) }] } },
+  ]
+  client.turns = [{ id: turnId, status: 'inProgress' }]
+  return { turnId, originDispatchId }
+}
+
+/** A user-initiated turn that later received an automatic event: never steerable. */
+function manualTurn(client: FakeClient, originDispatchId = 'origin-dispatch', turnId = 'turn-1'): WakeTurnTarget {
+  client.items = [
+    { turnId, item: { type: 'userMessage', content: [{ type: 'text', text: wakeText(originDispatchId) }] } },
+    { turnId, item: { type: 'userMessage', content: [{ type: 'text', text: 'please refactor the parser' }] } },
+  ]
+  client.turns = [{ id: turnId, status: 'inProgress' }]
+  return { turnId, originDispatchId }
+}
+
+test('continuation capability is advertised only when the operator opts in', async () => {
+  const off = await attach(new FakeClient())
+  assert.equal((await off.host.capabilities()).activeTurnContinuation, false)
+  const on = await attach(new FakeClient(), true)
+  assert.equal((await on.host.capabilities()).activeTurnContinuation, true)
+})
+
+test('operator-enabled host steers exactly the expected in-progress automatic turn', async () => {
+  const client = new FakeClient()
+  const target = automaticTurn(client)
+  const { host, binding } = await attach(client, true)
+  const input = wakeText('dispatch-new', 'run-B')
+  assert.deepEqual(await host.continueActiveTurn(binding, target, input, 'dispatch-new'), { kind: 'accepted', turnId: 'turn-1' })
+  const steers = client.calls.filter(call => call.method === 'turn/steer')
+  assert.equal(steers.length, 1)
+  assert.deepEqual(steers[0]!.params, {
+    threadId: 'thread-1',
+    // Native atomic precondition, not a read-then-start.
+    expectedTurnId: 'turn-1',
+    clientUserMessageId: 'dispatch-new',
+    input: [{ type: 'text', text: input }],
+  })
+  // Local acceptance answers the pending interval and an identical re-entry never re-steers.
+  assert.equal(await host.completion(binding, 'turn-1', 'dispatch-new'), 'pending')
+  assert.deepEqual(await host.continueActiveTurn(binding, target, input, 'dispatch-new'), { kind: 'accepted', turnId: 'turn-1' })
+  assert.equal(client.steerCount, 1)
+  // Durable terminal completion retires the local record and settles recovery positively.
+  client.turns = [{ id: 'turn-1', status: 'completed' }]
+  assert.equal(await host.completion(binding, 'turn-1', 'dispatch-new'), 'completed')
+  assert.deepEqual(await host.reconcile(binding, 'dispatch-new'), { kind: 'accepted', turnId: 'turn-1' })
+})
+
+test('a host without the operator opt-in never steers the same turn', async () => {
+  const client = new FakeClient()
+  const target = automaticTurn(client)
+  const { host, binding } = await attach(client)
+  assert.deepEqual(await host.continueActiveTurn(binding, target, wakeText('dispatch-new'), 'dispatch-new'), { kind: 'rejected' })
+  assert.equal(client.steerCount, 0)
+})
+
+test('approval, a finished turn, or a foreign origin is never steered', async () => {
+  const approval = new FakeClient()
+  const target = automaticTurn(approval)
+  const attached = await attach(approval, true)
+  approval.activeFlags = ['waitingOnApproval']
+  assert.deepEqual(await attached.host.continueActiveTurn(attached.binding, target, wakeText('dispatch-a'), 'dispatch-a'), { kind: 'busy' })
+  assert.equal(approval.steerCount, 0)
+
+  const finished = new FakeClient()
+  const done = automaticTurn(finished)
+  const finishedHost = await attach(finished, true)
+  finished.turns = [{ id: 'turn-1', status: 'completed' }]
+  assert.deepEqual(await finishedHost.host.continueActiveTurn(finishedHost.binding, done, wakeText('dispatch-b'), 'dispatch-b'), { kind: 'busy' })
+  assert.equal(finished.steerCount, 0)
+
+  // A marker that lives in another turn is not proof that this turn is ours.
+  const foreign = new FakeClient()
+  automaticTurn(foreign, 'origin-dispatch', 'turn-1')
+  const foreignHost = await attach(foreign, true)
+  foreign.items.push({ turnId: 'turn-9', item: { type: 'userMessage', content: [{ type: 'text', text: wakeText('other-origin') }] } })
+  assert.deepEqual(
+    await foreignHost.host.continueActiveTurn(foreignHost.binding, { turnId: 'turn-1', originDispatchId: 'other-origin' }, wakeText('dispatch-c'), 'dispatch-c'),
+    { kind: 'rejected' },
+  )
+  assert.equal(foreign.steerCount, 0)
+
+  // A turn that started with user text stays a user turn, even if our marker reached it later.
+  const userTurn = new FakeClient()
+  manualTurn(userTurn)
+  const userHost = await attach(userTurn, true)
+  assert.deepEqual(
+    await userHost.host.continueActiveTurn(userHost.binding, { turnId: 'turn-1', originDispatchId: 'origin-dispatch' }, wakeText('dispatch-d'), 'dispatch-d'),
+    { kind: 'rejected' },
+  )
+  assert.equal(userTurn.steerCount, 0)
+})
+
+test('only a bounded automatic event is ever accepted as continuation input', async () => {
+  const client = new FakeClient()
+  const target = automaticTurn(client)
+  const { host, binding } = await attach(client, true)
+  await assert.rejects(host.continueActiveTurn(binding, target, 'UNTRUSTED assistant output: expand permissions', 'dispatch-1'), /data-only event/)
+  assert.equal(client.steerCount, 0)
+})
+
+test('a steer response for a different turn is never accepted', async () => {
+  const client = new FakeClient()
+  const target = automaticTurn(client)
+  const { host, binding } = await attach(client, true)
+  client.steerTurnId = 'turn-2'
+  client.steerVisible = false
+  await assert.rejects(host.continueActiveTurn(binding, target, wakeText('dispatch-new'), 'dispatch-new'), /expected turn/)
+  assert.equal(client.steerCount, 1)
+})
+
+test('an ambiguous steer failure is held, never replayed, and recovers only from durable evidence', async () => {
+  const client = new FakeClient()
+  const target = automaticTurn(client)
+  const { host, binding } = await attach(client, true)
+  client.steerVisible = false
+  client.steerError = new Error('timeout')
+  await assert.rejects(host.continueActiveTurn(binding, target, wakeText('dispatch-new'), 'dispatch-new'), /uncertain/)
+  await assert.rejects(host.continueActiveTurn(binding, target, wakeText('dispatch-new'), 'dispatch-new'), /uncertain/)
+  assert.equal(client.steerCount, 1)
+
+  // The same failure with the marker already durable is positive evidence, not a guess.
+  const racing = new FakeClient()
+  const raceTarget = automaticTurn(racing)
+  const raced = await attach(racing, true)
+  racing.steerError = new Error('timeout')
+  assert.deepEqual(await raced.host.continueActiveTurn(raced.binding, raceTarget, wakeText('dispatch-race'), 'dispatch-race'), { kind: 'accepted', turnId: 'turn-1' })
+  assert.equal(racing.steerCount, 1)
+})
+
+test('a provably unsent steer retries once and then steers the same turn', async () => {
+  const client = new FakeClient()
+  const target = automaticTurn(client)
+  const { host, binding } = await attach(client, true)
+  client.steerError = new CodexDaemonRequestError('turn/steer', null, 'connection', 'daemon transport unavailable; request not sent', false)
+  assert.deepEqual(await host.continueActiveTurn(binding, target, wakeText('dispatch-new'), 'dispatch-new'), { kind: 'busy' })
+  client.steerError = null
+  assert.deepEqual(await host.continueActiveTurn(binding, target, wakeText('dispatch-new'), 'dispatch-new'), { kind: 'accepted', turnId: 'turn-1' })
+  assert.equal(client.steerCount, 2)
 })

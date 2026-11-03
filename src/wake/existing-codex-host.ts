@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto'
 import { resolve } from 'node:path'
 import { z } from 'zod'
 import { CodexDaemonRequestError } from './codex-daemon-client.js'
-import type { Admission, Completion, Recovery, WakeHost, WakeHostCapabilities } from './dispatcher.js'
+import { WAKE_INPUT_HEADER } from './dispatcher.js'
+import type { Admission, Completion, Recovery, WakeHost, WakeHostCapabilities, WakeTurnTarget } from './dispatcher.js'
 import type { WakeBinding } from './schema.js'
 
 /** The narrow initialized-client surface used by an already running local Codex daemon. */
@@ -25,6 +26,11 @@ export interface ExistingCodexHostOptions {
   codexHome: string
   uid: number | string
   bindings: ExistingCodexBinding[]
+  /**
+   * Operator opt-in only. Absent/false keeps the idle-only path: this host then
+   * never extends an in-progress turn and advertises no such capability.
+   */
+  continueAutomaticTurns?: boolean
 }
 
 const threadShape = z.object({ thread: z.object({
@@ -36,6 +42,8 @@ const queuePageShape = z.object({ data: z.array(z.object({ id: z.string(), clien
 const turnStartShape = z.object({ turn: z.object({ id: z.string() }).passthrough() }).passthrough()
 const queueAddShape = z.object({ queuedSubmission: z.object({ id: z.string(), clientUserMessageId: z.string() }).passthrough() }).passthrough()
 const queueDeleteShape = z.object({ deleted: z.boolean() }).passthrough()
+// Native TurnSteerResponse: the daemon reports the turn it extended.
+const turnSteerShape = z.object({ turnId: z.string() }).passthrough()
 
 /** Stable daemon identity for the already running Codex host: normalized socket, codexHome and uid. */
 export function codexServerIdentity(input: { socket: string; codexHome: string; uid: number | string }): string {
@@ -62,6 +70,12 @@ function isLocalNotSentFailure(error: unknown): boolean {
     && (error.category === 'connection' || error.category === 'busy')
 }
 
+/** Only a bounded data-only relay automatic event qualifies as a steerable turn origin. */
+function isAutomaticWakeInput(text: string): boolean {
+  return text.startsWith(WAKE_INPUT_HEADER)
+    && text.split('\n').some(line => line.startsWith('dispatchId=') && line.length > 'dispatchId='.length)
+}
+
 /** Attach to selected existing main-thread conversations without owning daemon lifecycle or changing thread settings. */
 export class ExistingCodexHost implements WakeHost {
   private readonly bound = new Map<string, string>()
@@ -74,10 +88,12 @@ export class ExistingCodexHost implements WakeHost {
   private constructor(
     private readonly client: ExistingCodexClient,
     readonly serverIdentity: string,
+    private readonly continueAutomaticTurns: boolean,
   ) {
     this.capability = {
       serverIdentity, authenticated: false, sameThreadResume: false,
       durableHistory: false, completionEvidence: false, exclusiveIdleAdmission: false,
+      activeTurnContinuation: false,
     }
     client.onDisconnected?.(() => { this.disconnected = true })
     client.onNotification?.(notification => {
@@ -100,7 +116,7 @@ export class ExistingCodexHost implements WakeHost {
     const identity = codexServerIdentity(options)
     await options.client.initialize()
     if (options.client.disconnected) throw new Error('existing Codex daemon client is disconnected')
-    const attached = new ExistingCodexHost(options.client, identity)
+    const attached = new ExistingCodexHost(options.client, identity, options.continueAutomaticTurns === true)
     // Initial configuration and later dynamic attachments share one exact-thread
     // attach path, so a host started with zero configured threads behaves identically.
     await attached.attachBindings(options.bindings)
@@ -143,7 +159,8 @@ export class ExistingCodexHost implements WakeHost {
     const live = !this.disconnected && !this.client.disconnected
     return { ...this.capability, authenticated: live && this.capability.authenticated,
       sameThreadResume: live && this.capability.sameThreadResume, durableHistory: live && this.capability.durableHistory,
-      completionEvidence: live && this.capability.completionEvidence, exclusiveIdleAdmission: live && this.capability.exclusiveIdleAdmission }
+      completionEvidence: live && this.capability.completionEvidence, exclusiveIdleAdmission: live && this.capability.exclusiveIdleAdmission,
+      activeTurnContinuation: live && this.capability.activeTurnContinuation === true }
   }
 
   /** Capability follows the live connection and whether any exact thread is attached. */
@@ -152,6 +169,8 @@ export class ExistingCodexHost implements WakeHost {
     this.capability = {
       serverIdentity: this.serverIdentity, authenticated: ready, sameThreadResume: ready,
       durableHistory: ready, completionEvidence: ready, exclusiveIdleAdmission: ready,
+      // Continuation stays a pure operator opt-in on top of a live attached host.
+      activeTurnContinuation: ready && this.continueAutomaticTurns,
     }
   }
 
@@ -228,6 +247,71 @@ export class ExistingCodexHost implements WakeHost {
       if (afterDelete) return { kind: 'accepted', turnId: afterDelete }
       throw new Error('existing Codex queue start outcome remains uncertain')
     }
+  }
+
+  /**
+   * Extends exactly `target.turnId` instead of waiting for it to end. The dispatcher
+   * owns the target choice from its own persisted deliveries; this host re-proves it
+   * against durable history, live turn status and approval state before submitting.
+   * Any other turn is never touched and no turn is ever started here.
+   */
+  async continueActiveTurn(binding: WakeBinding, target: WakeTurnTarget, input: string, dispatchId: string): Promise<Admission> {
+    this.requireBinding(binding)
+    if (!this.continueAutomaticTurns || !this.capability.activeTurnContinuation) return { kind: 'rejected' }
+    if (typeof target?.turnId !== 'string' || target.turnId.length === 0
+      || typeof target.originDispatchId !== 'string' || target.originDispatchId.length === 0) {
+      throw new Error('invalid active turn target')
+    }
+    // Serialized with turn admission: a start and a steer of this process never interleave.
+    const result = this.startTail.then(() => this.extend(binding, target, input, dispatchId))
+    this.startTail = result.catch(() => undefined)
+    return result
+  }
+
+  private async extend(binding: WakeBinding, target: WakeTurnTarget, input: string, dispatchId: string): Promise<Admission> {
+    if (!isAutomaticWakeInput(input)) throw new Error('active turn input must be a bounded relay data-only event')
+    // Bounded local record first: an idempotent re-entry of an already admitted dispatch.
+    const local = this.localAcceptance(dispatchId)
+    if (local) return { kind: 'accepted', turnId: local }
+    const prior = await this.findDispatch(binding.threadId, dispatchId)
+    if (prior) return { kind: 'accepted', turnId: prior }
+    // The target must be the turn an earlier own dispatch opened. A user-initiated turn
+    // never matches, so it can never be steered.
+    const origin = await this.findDispatch(binding.threadId, target.originDispatchId)
+    if (origin !== target.turnId) return { kind: 'rejected' }
+    if (await this.findTurnStatus(binding.threadId, target.turnId) !== 'inProgress') return { kind: 'busy' }
+    const { thread } = threadShape.parse(await this.client.request('thread/read', { threadId: binding.threadId }))
+    // Approval state must be re-checked at submit time, not trusted from an earlier inspect.
+    if ((thread.status.activeFlags ?? []).includes('waitingOnApproval')) return { kind: 'busy' }
+    // The turn must have BEGUN with our bounded automatic event, not with user text.
+    const first = await this.findTurnOrigin(binding.threadId, target.turnId)
+    if (first === null || !isAutomaticWakeInput(first)) return { kind: 'rejected' }
+    if (this.attemptedDispatches.has(dispatchId)) throw new Error('existing Codex steer outcome remains uncertain')
+    this.attemptedDispatches.add(dispatchId)
+    let response: { turnId: string }
+    try {
+      response = turnSteerShape.parse(await this.client.request('turn/steer', {
+        threadId: binding.threadId,
+        // Atomic precondition in the native request: the daemon rejects any other active turn.
+        expectedTurnId: target.turnId,
+        clientUserMessageId: dispatchId,
+        input: [{ type: 'text', text: input }],
+      }))
+    } catch (error) {
+      if (isLocalNotSentFailure(error)) {
+        // Provably never sent: forget the attempt and let the delivery wait for a later tick.
+        this.attemptedDispatches.delete(dispatchId)
+        return { kind: 'busy' }
+      }
+      // Any ambiguous failure keeps the existing held behavior: durable marker or nothing.
+      const accepted = await this.findDispatch(binding.threadId, dispatchId)
+      if (accepted) return { kind: 'accepted', turnId: accepted }
+      throw new Error('existing Codex steer outcome remains uncertain')
+    }
+    // Accept only the exact expected turn; anything else is unproven, never a success.
+    if (response.turnId !== target.turnId) throw new Error('existing Codex steer did not extend the expected turn')
+    this.rememberAcceptance(dispatchId, response.turnId)
+    return { kind: 'accepted', turnId: response.turnId }
   }
 
   async completion(binding: WakeBinding, turnId: string, dispatchId = ''): Promise<Completion> {
@@ -341,6 +425,39 @@ export class ExistingCodexHost implements WakeHost {
     }
     // A bound-limited miss is unknown, never evidence of non-acceptance.
     throw new Error('existing Codex history scan exceeded its page bound')
+  }
+
+  /**
+   * Earliest durable user message text of one exact turn. `thread/items/list` is read
+   * newest-first, so the last matching message of a contiguous turn is its first one.
+   * A bounded scan miss returns null: never evidence that a turn is automatic.
+   */
+  private async findTurnOrigin(threadId: string, turnId: string): Promise<string | null> {
+    let cursor: string | undefined
+    let earliest: string | null = null
+    let seen = false
+    for (let page = 0; page < 100; page++) {
+      const result = pageShape.parse(await this.client.request('thread/items/list', {
+        threadId, limit: 100, sortDirection: 'desc', ...(cursor ? { cursor } : {}),
+      }))
+      for (const raw of result.data) {
+        if (!raw || typeof raw !== 'object') continue
+        const entry = raw as { turnId?: unknown; item?: { type?: unknown; content?: unknown } }
+        if (entry.item?.type !== 'userMessage' || typeof entry.turnId !== 'string' || !Array.isArray(entry.item.content)) continue
+        if (entry.turnId !== turnId) {
+          // Messages are turn-contiguous: once past the target turn its first message is known.
+          if (seen) return earliest
+          continue
+        }
+        const part = entry.item.content.find(part => !!part && typeof part === 'object'
+          && (part as { type?: unknown }).type === 'text' && typeof (part as { text?: unknown }).text === 'string')
+        seen = true
+        if (part) earliest = (part as { text: string }).text
+      }
+      if (result.nextCursor === null) return earliest
+      cursor = result.nextCursor
+    }
+    return null
   }
 
   private async findTurnStatus(threadId: string, turnId: string): Promise<string | null> {
