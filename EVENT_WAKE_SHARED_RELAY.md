@@ -1,6 +1,6 @@
 # Explicit use of an existing loopback Relay
 
-> **Workflow note — 2026-11-03:** The instructions below describe sharing Relay with the managed-console workflow. A separate opt-in now supports selected existing Codex daemon threads; it uses the current local Relay descriptor but has a distinct config and worker lifecycle. See [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md). The existing-thread config is not enabled by default, and evidence on dedicated threads does not yet validate the original user root/main thread.
+> **Current workflow — 2026-11-03:** a separate opt-in attaches the standard proxy to selected existing Codex daemon threads, sharing the existing Relay without restarting DSH. Original-main automatic result consumption is now verified. See [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md) for bindings, controls and rollback; the managed-console workflow below remains optional.
 
 The wake console defaults to `relayMode: "isolated"`. In that mode, a configured Relay descriptor and its token file must both resolve inside `testRoot`, and port 3080 is rejected.
 

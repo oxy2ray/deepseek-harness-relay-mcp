@@ -528,6 +528,6 @@ MIT
 
 ## 持久唤醒（显式绑定现有 Codex 线程）
 
-标准代理可通过独立持久收集器，连接明确配置的现有 Codex daemon 线程。专用 remote TUI 已实际收到同线程自动事件并用 `get_run` 核对 DSH 结果，中间没有调用 `wait_run`；原始用户主对话的验收另行记录。配置、实测证据和回滚见 [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md)。没有显式配置时保留原来的等待流程，受控控制台也保留为独立可选入口。启用唤醒不扩大任务权限。
+标准代理可通过独立持久收集器，连接明确配置的现有 Codex daemon 线程。原始用户主对话已实际收到自动事件：先处理 B，再用一个回合处理 A/C，并通过 `get_run` 取得三份完整结果；交接后没有调用 `wait_run`。配置、实测证据和回滚见 [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md)。没有显式配置时保留原来的等待流程，受控控制台也保留为独立可选入口。启用唤醒不扩大任务权限。
 
 启动和日常操作见 [快速使用](EVENT_WAKE_QUICKSTART.md)。配置、控制与回滚见 [实现说明](EVENT_WAKE_IMPLEMENTATION.md)，复用现有服务见 [显式配置](EVENT_WAKE_SHARED_RELAY.md)，证据见 [验证记录](EVENT_WAKE_VALIDATION.md)。支持独立认证或只读挂载当前认证；准备脚本不会复制凭据。

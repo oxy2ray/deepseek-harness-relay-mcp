@@ -1,5 +1,12 @@
 # CHANGELOG
 
+## 0.2.21
+
+- Retire resolved approval requests and use each thread's live approval flags instead of a global request count; passive wake connections never approve requests.
+- Retry only explicit local pre-send failures, retain uncertain server outcomes, and keep locally accepted turns pending while durable history catches up. Search long histories newest first.
+- Seed new state before binding registration, preserve operator pauses on restart, and expose bounded worker-readiness diagnostics.
+- Record original-main-thread E2E: three concurrent real DSH reviews, B-first/A+C batch delivery, three native result reads and zero model wait calls after handoff.
+
 ## 0.2.20
 
 - Add opt-in wake for configured existing Codex daemon threads through Unix WebSocket attachment and atomic native queue admission, preserving thread permissions and daemon lifecycle.

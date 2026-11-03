@@ -17,7 +17,7 @@ try {
     const state = await outbox.store.read()
     // The dedicated worker survives the lifetime of this MCP stdio process.
     // Concurrent startups arbitrate through its existing durable worker lock.
-    if (!state.worker || Date.now() - state.worker.heartbeatAt > 3000) {
+    if (!state.worker || !state.worker.ready || Date.now() - state.worker.heartbeatAt > 3000) {
       const worker = spawn(process.execPath, [fileURLToPath(new URL('./dsh-relay-wake-existing.mjs', import.meta.url)), path], {
         detached: true, stdio: 'ignore',
       })

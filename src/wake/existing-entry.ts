@@ -14,10 +14,15 @@ await mkdir(dirname(config.wakeState), { recursive: true, mode: 0o700 })
 const outbox = new WakeOutbox(new WakeStore(config.wakeState))
 // This process lease also covers reconnect intervals, preventing duplicate reconnect workers.
 const owner = await acquireWakeLock(config.wakeState + '.existing-process.lock')
-const hadState = await access(config.wakeState).then(() => true, error => {
+const hasState = await access(config.wakeState).then(() => true, error => {
   if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
   throw error
 })
+// Bootstrap seed only: config.enabled initializes a brand-new store before bindings
+// create durable state, so an interrupted first attach cannot strand the initial
+// opt-in. An existing store keeps its `enabled`, including an operator pause; this
+// is not a standing override and config is read once per process (stop/restart).
+if (!hasState) await outbox.store.transaction(state => { state.enabled = config.enabled })
 let stop = false
 let timer: NodeJS.Timeout | undefined
 let wake: (() => void) | undefined
@@ -46,8 +51,6 @@ try {
         } else await outbox.registerBinding({ ...binding, principal: config.principal,
           serverIdentity: host.serverIdentity, enabled: true })
       }
-      // A persisted operator pause survives worker restarts and socket reconnects.
-      if (!hadState && config.enabled && !(await outbox.store.read()).worker) await outbox.setEnabled(true)
       source = await NativeRelayWakeSource.connect({ descriptorFile: config.relayDescriptor,
         clientPrincipalId: config.principal, requestTimeoutMs: 5000, autoStart: false })
       runtime = new WakeRuntime(outbox, source, host)

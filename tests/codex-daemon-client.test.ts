@@ -259,6 +259,61 @@ test('a missing Unix socket path is a bounded connection failure', async () => {
   }
 })
 
+test('serverRequest/resolved retires the inbound record without ever answering it', async () => {
+  const fixture = await startUnixWebSocketServer((message, socket) => {
+    const method = typeof message.method === 'string' ? message.method : ''
+    if (method === 'probe/error') {
+      socket.send(JSON.stringify({ id: message.id, error: { code: -32000, message: 'connection lost' } }))
+      return
+    }
+    if (method === 'initialize') {
+      socket.send(JSON.stringify({
+        id: message.id,
+        result: { userAgent: 'codex-fixture/0.166', platformFamily: 'unix', platformOs: 'linux', codexHome: '/private/codex' },
+      }))
+      return
+    }
+    if (method === 'thread/read') {
+      socket.send(JSON.stringify({
+        id: 'approval-1', method: 'execCommandApproval', params: { conversationId: 'thread-a' },
+      }))
+      socket.send(JSON.stringify({
+        method: 'serverRequest/resolved', params: { threadId: 'thread-a', requestId: 'approval-1' },
+      }))
+      socket.send(JSON.stringify({ id: message.id, result: { thread: { id: 'thread-a', cwd: '/workspace', status: { type: 'idle' } } } }))
+      return
+    }
+  })
+
+  const transport = createCodexUnixWebSocketTransport({ socket: fixture.socketPath })
+  const client = new CodexDaemonClient({ transport, requestTimeoutMs: 2000 })
+  const recorded: CodexDaemonServerRequest[] = []
+  const notifications: CodexDaemonNotification[] = []
+  client.onServerRequest(request => { recorded.push(request) })
+  client.onNotification(notification => { notifications.push(notification) })
+
+  try {
+    await client.initialize()
+    await client.request('thread/read', { threadId: 'thread-a', includeTurns: false })
+    await waitFor(() => notifications.some(notification => notification.method === 'serverRequest/resolved'))
+    // The request was recorded, then retired by its requestId.
+    assert.deepEqual(recorded, [{ id: 'approval-1', method: 'execCommandApproval' }])
+    assert.equal(client.serverRequestCount, 0)
+    await assert.rejects(client.request('probe/error'), (error: unknown) => {
+      assert.ok(error instanceof CodexDaemonRequestError)
+      assert.equal(error.origin, 'server')
+      return true
+    })
+    // And it was never answered: no client frame replies to the approval id.
+    await tick()
+    assert.equal(fixture.clientMessages.some(message => message.id === 'approval-1'), false)
+    assert.equal(fixture.clientMessages.some(message => message.method === 'execCommandApproval'), false)
+  } finally {
+    await client.close().catch(() => {})
+    await fixture.close()
+  }
+})
+
 test('transport rejects unsafe socket paths before opening a connection', () => {
   assert.throws(
     () => createCodexUnixWebSocketTransport({ socket: '' }),

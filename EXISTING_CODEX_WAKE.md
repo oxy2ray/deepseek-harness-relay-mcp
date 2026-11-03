@@ -1,6 +1,6 @@
 # Opt-in wake for existing Codex threads
 
-**Status as of 2026-11-03:** the checkout contains an opt-in adapter for selected existing Codex daemon threads. P0 verified exact, distinct `_meta.threadId` values for two test threads; a separate primary queue test exercised A/B marker turns in one test thread and rejected a competing busy queue start. Both markers appeared once in durable history and remained visible after reconnect. P1 verified a real watch acknowledgement and same-thread `get_run` wake without `wait_run`; a live restart recovery is now also verified below. It does not prove the original user's main thread or a busy-queue retention snapshot. Do not describe the overall goal as complete or assume an installed plugin has this code; verify the installed build with `doctor` after installation.
+**Status as of 2026-11-03:** automatic wake is verified on the original user main thread, not only a separate console. Three real concurrent DSH reviews produced two automatic turns: B first, then A/C as one batch. That same main thread fetched all three full results with native `get_run`, with zero intervening `wait_run` calls and one admission attempt per delivery. Version 0.2.21 includes the review-driven approval bookkeeping and recovery fixes. This evidence does not claim that every reliability scenario or latency target has been tested.
 
 This path attaches to the already-running Codex daemon over its local AF_UNIX WebSocket and resumes only operator-configured threads. It does not start or restart Codex, discover threads, change sandbox or approval settings, or bind all future threads. Every new thread needs an explicit binding. The standard Relay stdio proxy starts the separate wake worker only when the opt-in config is present. Without that file, ordinary Relay behavior remains unchanged.
 
@@ -26,6 +26,8 @@ Build the checkout, then create the config at `~/.local/state/dsh-relay-wake/exi
   ]
 }
 ```
+
+`enabled` seeds a brand-new wake state once, before bindings are written. Existing state keeps the operator's persisted pause/resume choice; editing this field does not resume an existing state. Configuration is read once per worker process: stop that worker, edit the config, and restart it to apply changes. Use the control commands below for pause/resume.
 
 Optional `relayWorkspace` maps the workspace recorded by a Relay run when it differs from the Codex workspace. No secrets or destination instructions belong in this file. Binding identity is persisted; use a new binding ID when changing the thread or workspace. Do not add an arbitrary destination to a model tool call.
 
@@ -55,7 +57,7 @@ node dist/dsh-relay-wake-control.mjs pause /absolute/path/to/dsh-relay-wake/wake
 node dist/dsh-relay-wake-control.mjs renew /absolute/path/to/dsh-relay-wake/wake.json operator-selected-binding 1893456000000
 ```
 
-Global `pause` keeps collecting durable events but stops new automatic delivery/admission. It cannot cancel a Codex turn already accepted and running. Binding-specific pause disables new delivery for that binding. `resume` enables global delivery; it does not override a binding-specific pause. Renew an expired binding through the control command rather than changing its identity. Review status before resuming held or queued work.
+Global `pause` keeps collecting durable events but stops new automatic delivery/admission. It cannot cancel a Codex turn already accepted and running. Binding-specific pause disables new delivery for that binding. `resume` enables global delivery; it does not override a binding-specific pause. Renew an expired binding through the control command rather than changing its identity. Status includes `workerReady`, `workerHeartbeatAgeMs`, `workerBindings` and `pausedBindings` in addition to delivery counts. The readiness flag uses the same three-second heartbeat lease as watch admission. Review status before resuming held or queued work.
 
 ## Roll back
 
@@ -66,10 +68,10 @@ node dist/dsh-relay-wake-control.mjs pause /absolute/path/to/dsh-relay-wake/wake
 rm /absolute/path/to/existing-daemon.json
 ```
 
-Removing the config does not stop an already-running detached worker. After confirming the command line belongs to this wake worker, send it `SIGTERM`; do not signal the Codex daemon or a different Relay process. Keep the wake state until queued or held work has been reviewed and retained evidence is no longer needed. No Relay or Codex daemon restart is part of setup or rollback.
+Removing the config does not stop an already-running detached worker. After confirming the command line belongs to this wake worker, send it `SIGTERM`; do not signal the Codex daemon or a different Relay process. Confirm that the selected worker has exited before considering rollback finished. Keep the wake state until queued or held work has been reviewed and retained evidence is no longer needed. No Relay or Codex daemon restart is part of setup or rollback.
 
 ```sh
-ps -eo pid=,args= | grep '[d]sh-relay-wake-existing.mjs'
+ps -eo pid=,args= | rg 'dsh-relay-wake-existing[.]mjs'
 kill -TERM <confirmed-worker-pid>
 ```
 
@@ -78,6 +80,10 @@ kill -TERM <confirmed-worker-pid>
 - **P0, Codex 0.166:** exact, distinct `_meta.threadId` values were verified for two separate test threads. In the primary queue test, A and B marker turns were both sent to one test thread; a competing queue start was rejected while that thread was busy. Both markers appeared exactly once in durable history and remained visible after reconnect. The attempted busy-queue retention snapshot queried the wrong queue-list field, so that snapshot was not recorded and is not a pass.
 - **P1, dedicated remote TUI:** `watch_run` returned structured acknowledgement and `hostMayConcludeTurn: true`; the host ended in `P1_WAITING`, then the same thread resumed on a real wake, called `get_run`, and recorded `P1_WAKE_VERIFIED`. It did not call `wait_run` in between.
 - The worker initially held a delivery when history visibility was transient. Restart recovery is now live-verified: only test workers 581851/582302 were stopped after config and command-line identity checks; after restarting built version 0.2.20, held dispatch `7fed...` became acknowledged against its original turn `01a1a1d7...`, with no extra dispatch, event, or turn. Positive-evidence held reconciliation tests pass 9/9. The separate busy-retention snapshot remains unpassed.
-- The original user root/main thread has not yet passed acceptance. Do not generalize the thread-binding test or dedicated P1 thread to that target. Production latency and effectively-once guarantees are not established.
+- **P2, original user main thread:** three concurrent real Ark reviews were watched through the installed standard plugin. B completed first and caused one automatic turn; A/C were then delivered together in a second turn. The original thread ID stayed unchanged; all three native `get_run` results were consumed, both deliveries had one admission attempt, and no model `wait_run` occurred after handoff. A subsequent implementation run was steered natively without replacing its run or watch; the steer operation was acknowledged and its terminal event returned to the same main thread.
+- **Installed-build check:** a fresh read-only Codex task, using the installed standard plugin with no custom Relay alias, reported `doctor.relayVersion=0.2.20` and `remote.connected=true`; the required `doctor`, `list_capabilities`, `start_review` and `wait_run` tools were present.
+- **0.2.21 revision check:** the final client/host regression files pass 16/16, worker diagnostics pass 1/1, and TypeScript plus `prepare:codex-local` pass. A fresh default-plugin Codex task reports version 0.2.21 with a connected Relay and the required tool catalog. The main wake worker's command line points to that installed cache; status reports one ready binding. Before/after comparison confirmed the main thread's workspace, model, reasoning and permission settings unchanged. The production DSH process and owner epoch were unchanged.
+- **Final integration record:** five real DSH review/implementation results were consumed across four original-main automatic turns, including the A/C batch. All four deliveries had one admission attempt; the last delivery remains in progress while this final verification turn is active. No additional DSH request was submitted to manufacture a completion callback. The three prior automatic turns were already acknowledged before the client-only revision was installed.
+- **Limits:** the busy-retention snapshot was not recorded; a live high-risk approval interaction, every failure-matrix scenario, and production P95 latency have not been measured by this continuation. Controlled unit tests cover approval bookkeeping, uncertain outcomes, queue races and persistence. These are not represented as live E2E results.
 
 See [implementation status](EVENT_WAKE_IMPLEMENTATION.md), [validation record](EVENT_WAKE_VALIDATION.md), [P0 source audit](EVENT_WAKE_P0_AUDIT.md), and the historical [managed-console quick start](EVENT_WAKE_QUICKSTART.md). The managed console remains an optional separate path; its old documentation is retained for that workflow.

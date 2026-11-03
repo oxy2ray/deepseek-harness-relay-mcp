@@ -1,17 +1,21 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
+import { CodexDaemonRequestError } from '../src/wake/codex-daemon-client.js'
 import { ExistingCodexHost, type ExistingCodexClient } from '../src/wake/existing-codex-host.js'
 import type { WakeBinding } from '../src/wake/schema.js'
 
 class FakeClient implements ExistingCodexClient {
   disconnected = false
   serverRequestCount = 0
+  activeFlags: string[] = []
   calls: Array<{ method: string; params: Record<string, unknown> }> = []
   queue: Array<{ id: string; clientUserMessageId: string | null }> = []
   items: unknown[] = []
+  itemPages: Array<{ data: unknown[]; nextCursor: string | null }> | null = null
   turns: unknown[] = []
   consumeOnAdd = false
   startBusy = false
+  startVisible = true
   deleteWins = true
   addCount = 0
   startCount = 0
@@ -25,9 +29,16 @@ class FakeClient implements ExistingCodexClient {
     let result: unknown
     switch (method) {
       case 'thread/resume':
-      case 'thread/read': result = { thread: { id: 'thread-1', cwd: '/workspace', status: { type: 'idle', activeFlags: [] } } }; break
+      case 'thread/read': result = { thread: { id: 'thread-1', cwd: '/workspace', status: { type: 'idle', activeFlags: [...this.activeFlags] } } }; break
       case 'thread/turns/list': result = { data: this.turns, nextCursor: null }; break
-      case 'thread/items/list': result = { data: this.items, nextCursor: null }; break
+      case 'thread/items/list': {
+        if (this.itemPages) {
+          const index = typeof p.cursor === 'string' ? Number(p.cursor) : 0
+          const page = this.itemPages[index]
+          result = { data: page?.data ?? [], nextCursor: page?.nextCursor ?? null }
+        } else result = { data: this.items, nextCursor: null }
+        break
+      }
       case 'thread/queue/list': result = { data: this.queue, nextCursor: null }; break
       case 'thread/queue/add': {
         this.addCount++
@@ -42,8 +53,10 @@ class FakeClient implements ExistingCodexClient {
         this.startCount++
         if (this.startBusy) throw new Error('active or pending turn')
         this.queue = this.queue.filter(row => row.id !== p.queuedSubmissionId)
-        this.items.push({ turnId: 'turn-started', item: { type: 'userMessage', content: [{ type: 'text', text: 'wake\ndispatchId=dispatch-1' }] } })
-        this.turns.push({ id: 'turn-started', status: 'inProgress' })
+        if (this.startVisible) {
+          this.items.push({ turnId: 'turn-started', item: { type: 'userMessage', content: [{ type: 'text', text: 'wake\ndispatchId=dispatch-1' }] } })
+          this.turns.push({ id: 'turn-started', status: 'inProgress' })
+        }
         result = { turn: { id: 'turn-started' } }
         break
       case 'thread/queue/delete':
@@ -141,4 +154,89 @@ test('resume uses only the selected thread id and excludeTurns', async () => {
   const client = new FakeClient()
   await attach(client)
   assert.deepEqual(client.calls.find(call => call.method === 'thread/resume')?.params, { threadId: 'thread-1', excludeTurns: true })
+})
+
+test('inspect reads approval state from the inspected thread only, never a global request count', async () => {
+  const client = new FakeClient()
+  // An unrelated thread's still-open server request must not make an idle thread look blocked.
+  client.serverRequestCount = 7
+  const { host, binding } = await attach(client)
+  assert.deepEqual(await host.inspect(binding), {
+    threadId: 'thread-1', workspace: '/workspace', idle: true, waitingOnApproval: false,
+  })
+
+  client.activeFlags = ['waitingOnApproval']
+  assert.equal((await host.inspect(binding)).waitingOnApproval, true)
+})
+
+test('explicit local NOT-SENT queue/add clears the attempt and retries safely', async () => {
+  const client = new FakeClient()
+  const request = client.request.bind(client)
+  let failed = false
+  client.request = async <T>(method: string, params: unknown = {}): Promise<T> => {
+    if (method === 'thread/queue/add' && !failed) {
+      failed = true
+      client.addCount++
+      throw new CodexDaemonRequestError(
+        'thread/queue/add', null, 'connection', 'daemon transport unavailable; request not sent', false,
+      )
+    }
+    return request<T>(method, params)
+  }
+  const { host, binding } = await attach(client)
+  assert.deepEqual(await host.startWhenIdle(binding, 'wake\ndispatchId=dispatch-1', 'dispatch-1'), { kind: 'busy' })
+  // The attempt marker was cleared, so the retry is admitted instead of held.
+  assert.deepEqual(await host.startWhenIdle(binding, 'wake\ndispatchId=dispatch-1', 'dispatch-1'), { kind: 'accepted', turnId: 'turn-started' })
+  assert.equal(client.addCount, 2)
+})
+
+test('an ambiguous server-side queue/add failure is still held and never repeated', async () => {
+  const client = new FakeClient()
+  const request = client.request.bind(client)
+  client.request = async <T>(method: string, params: unknown = {}): Promise<T> => {
+    if (method === 'thread/queue/add') {
+      client.addCount++
+      throw new CodexDaemonRequestError('thread/queue/add', null, 'connection', 'Codex server request failed', false, 'server')
+    }
+    return request<T>(method, params)
+  }
+  const { host, binding } = await attach(client)
+  await assert.rejects(host.startWhenIdle(binding, 'wake\ndispatchId=dispatch-1', 'dispatch-1'), /uncertain/)
+  await assert.rejects(host.startWhenIdle(binding, 'wake\ndispatchId=dispatch-1', 'dispatch-1'), /uncertain/)
+  assert.equal(client.addCount, 1)
+})
+
+test('a locally admitted turn stays pending until durable history surfaces it, then clears', async () => {
+  const client = new FakeClient()
+  client.startVisible = false
+  const { host, binding } = await attach(client)
+  assert.deepEqual(await host.startWhenIdle(binding, 'wake\ndispatchId=dispatch-1', 'dispatch-1'), { kind: 'accepted', turnId: 'turn-started' })
+  // Durable history has no row yet: the local admission record answers pending, not unknown.
+  assert.equal(await host.completion(binding, 'turn-started', 'dispatch-1'), 'pending')
+  // Idempotent local re-entry is accepted from the same record.
+  assert.deepEqual(await host.reconcile(binding, 'dispatch-1'), { kind: 'accepted', turnId: 'turn-started' })
+
+  client.turns.push({ id: 'turn-started', status: 'completed' })
+  assert.equal(await host.completion(binding, 'turn-started', 'dispatch-1'), 'completed')
+  // Durable terminal completion retired the local record; a missing marker is now unknown.
+  assert.deepEqual(await host.reconcile(binding, 'dispatch-1'), { kind: 'unknown' })
+
+  // A non-string status is not a speculative protocol fallback: it stays unknown.
+  client.turns.push({ id: 'turn-object', status: { type: 'completed' } })
+  assert.equal(await host.completion(binding, 'turn-object'), 'unknown')
+})
+
+test('history scans descend and stop at the newest durable dispatch marker', async () => {
+  const client = new FakeClient()
+  client.itemPages = [
+    { data: [{ turnId: 'turn-newest', item: { type: 'userMessage', content: [{ type: 'text', text: 'wake\ndispatchId=dispatch-1' }] } }], nextCursor: '1' },
+    { data: [{ turnId: 'turn-ancient', item: { type: 'userMessage', content: [{ type: 'text', text: 'wake\ndispatchId=dispatch-1' }] } }], nextCursor: null },
+  ]
+  const { host, binding } = await attach(client)
+  const before = client.calls.filter(call => call.method === 'thread/items/list').length
+  assert.deepEqual(await host.startWhenIdle(binding, 'wake\ndispatchId=dispatch-1', 'dispatch-1'), { kind: 'accepted', turnId: 'turn-newest' })
+  const scans = client.calls.filter(call => call.method === 'thread/items/list').slice(before)
+  // Newest-first page already carried the marker, so ancient pages were never fetched.
+  assert.equal(scans.length, 1)
+  assert.equal(scans[0]?.params.sortDirection, 'desc')
 })

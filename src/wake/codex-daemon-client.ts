@@ -72,6 +72,7 @@ export class CodexDaemonRequestError extends Error {
     category: CodexDaemonRequestCategory,
     message: string,
     outcomeUncertain = false,
+    readonly origin: 'local' | 'server' = 'local',
   ) {
     super(message)
     this.name = 'CodexDaemonRequestError'
@@ -539,6 +540,18 @@ export class CodexDaemonClient {
     } catch { /* Listener faults must not break protocol framing. */ }
   }
 
+  /**
+   * The official `serverRequest/resolved` notification retires a recorded request.
+   * Bookkeeping only: this client never answers, approves or rejects a server
+   * request — it just forgets that the request is still outstanding.
+   */
+  private retireServerRequest(params: unknown): void {
+    if (!isRecord(params)) return
+    const requestId = params.requestId
+    if (typeof requestId !== 'string' && typeof requestId !== 'number') return
+    this.serverRequests.delete(requestId)
+  }
+
   private receive(line: string): void {
     if (this.closed) return
     let message: unknown
@@ -565,6 +578,7 @@ export class CodexDaemonClient {
         return
       }
       this.notificationCount += 1
+      if (method === 'serverRequest/resolved') this.retireServerRequest(message.params)
       this.emitSafely('notification', { method, params: message.params })
       return
     }
@@ -585,6 +599,7 @@ export class CodexDaemonClient {
       pending.reject(new CodexDaemonRequestError(
         pending.method, code, category,
         `Codex request failed (method=${pending.method}, category=${category}, code=${code ?? 'unknown'})`,
+        false, 'server',
       ))
       return
     }

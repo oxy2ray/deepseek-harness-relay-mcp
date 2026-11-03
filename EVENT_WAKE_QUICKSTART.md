@@ -1,6 +1,6 @@
 # Event wake managed-console quick start
 
-> **Workflow note — 2026-11-03:** This is the historical, separate managed-console quick start. For the new opt-in that attaches to operator-selected threads in an already-running Codex daemon, use [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md). The existing-thread path is not auto-bound to every thread, and the original user root/main thread is not yet validated. No config means the ordinary Relay proxy remains unchanged.
+> **Current entry point — 2026-11-03:** for configured existing Codex daemon threads, use [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md). Automatic result consumption has been verified on the original user main thread. The console workflow below is retained as an optional historical fallback; it is not required for existing-thread wake.
 
 The wake consumer currently runs as an opt-in managed-console fallback. It owns a private Codex app-server process and thread; it is not a general plugin integration for an existing Codex TUI session.
 
