@@ -27,6 +27,26 @@ try {
   // a failure leaves the last good build untouched, then promote atomically.
   await mkdir(staging, { recursive: true })
   await Promise.all([
+    ...['console', 'proxy'].map(name => build({
+      ...common,
+      entryPoints: [fileURLToPath(new URL(`../src/wake/${name}-entry.ts`, import.meta.url))],
+      outfile: join(staging, `dsh-relay-wake-${name}.mjs`),
+      banner: { js: '#!/usr/bin/env node' },
+      external: ['zod', '@modelcontextprotocol/sdk'],
+    })),
+    build({
+      ...common,
+      entryPoints: [fileURLToPath(new URL('../src/wake/index.ts', import.meta.url))],
+      outfile: join(staging, 'dsh-relay-wake.mjs'),
+      external: ['zod', '@modelcontextprotocol/sdk'],
+    }),
+    build({
+      ...common,
+      entryPoints: [fileURLToPath(new URL('../src/wake/control.ts', import.meta.url))],
+      outfile: join(staging, 'dsh-relay-wake-control.mjs'),
+      banner: { js: '#!/usr/bin/env node' },
+      external: ['zod'],
+    }),
     build({
       ...common,
       entryPoints: [fileURLToPath(new URL('../src/index.ts', import.meta.url))],

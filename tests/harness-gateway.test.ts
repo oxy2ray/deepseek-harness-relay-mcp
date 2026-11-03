@@ -54,6 +54,35 @@ test('HTTP gateway maps semantic operations to the public Host wire contract', a
   ])
 })
 
+test('HTTP gateway archives and restores through workspace operations without stop side effects', async () => {
+  const requests: Array<{ method: string; payload: Record<string, unknown> }> = []
+  const gateway = createHttpHarnessGateway('http://127.0.0.1:3080/', 1_000, host(request => {
+    requests.push({ method: request.method, payload: request.payload })
+    return { archivedSessionIds: request.method === 'workspace.archiveSession' ? ['session-1'] : [] }
+  }))
+
+  assert.deepEqual(await gateway.archiveSession('session-1'), { archivedSessionIds: ['session-1'] })
+  assert.deepEqual(await gateway.unarchiveSession('session-1'), { archivedSessionIds: [] })
+  assert.deepEqual(requests, [
+    { method: 'workspace.archiveSession', payload: { sessionId: 'session-1', stopActivity: false } },
+    { method: 'workspace.unarchiveSession', payload: { sessionId: 'session-1' } },
+  ])
+})
+
+test('HTTP gateway turns a missing archive route into actionable incompatibility', async () => {
+  const gateway = createHttpHarnessGateway('http://127.0.0.1:3080/', 1_000, async (_input, init) => {
+    const request = JSON.parse(String(init?.body)) as { rpcId: string }
+    return response(request.rpcId, undefined, { code: 'METHOD_NOT_FOUND', message: 'workspace.archiveSession is not registered' })
+  })
+
+  await assert.rejects(gateway.archiveSession('session-1'), (error: unknown) => {
+    assert(error instanceof HostRpcError)
+    assert.equal(error.code, 'HOST_API_INCOMPATIBLE')
+    assert.equal(error.retryable, false)
+    return true
+  })
+})
+
 test('HTTP gateway preserves definitive Host errors without exposing generic RPC methods', async () => {
   const gateway = createHttpHarnessGateway('http://127.0.0.1:3080/', 1_000, async (_input, init) => {
     const request = JSON.parse(String(init?.body)) as { rpcId: string }
@@ -135,6 +164,41 @@ test('Facade accepts a transport-free provider for the future in-process adapter
   assert.deepEqual(await gateway.describeHost(), { mode: 'in-process-fake' })
   assert.deepEqual(calls, ['describeHost'])
   assert.equal('call' in gateway, false)
+})
+
+test('facade fails closed with actionable incompatibility when archive methods are absent', async () => {
+  const provider = {
+    async describeHost() { return {} },
+    async listWorkspaces() { return { items: [], archivedSessionIds: [] } },
+    async createWorkspace() { throw new Error('unexpected') },
+    async listSessions() { return [] },
+    async createSession() { throw new Error('unexpected') },
+    async readHistory() { throw new Error('unexpected') },
+    async describeSettings() { throw new Error('unexpected') },
+    async selectSessionModel() { throw new Error('unexpected') },
+    async replaceSettings() { throw new Error('unexpected') },
+    async mutateSettings() { throw new Error('unexpected') },
+    async submitPrompt() { throw new Error('unexpected') },
+    async updateQueue() { throw new Error('unexpected') },
+    async cancelSession() { throw new Error('unexpected') },
+    async openPath() { throw new Error('unexpected') },
+    async listModels() { throw new Error('unexpected') },
+    async listAgentPresets() { throw new Error('unexpected') },
+    async readPermissionProjection() { throw new Error('unexpected') },
+    async requestPermissionSelection() { throw new Error('unexpected') },
+  }
+  const gateway = new HarnessGatewayFacade(provider)
+
+  for (const operation of [() => gateway.archiveSession('session-1'), () => gateway.unarchiveSession('session-1')]) {
+    await assert.rejects(operation, (error: unknown) => {
+      assert(error instanceof HostRpcError)
+      assert.equal(error.code, 'HOST_API_INCOMPATIBLE')
+      assert.equal(error.definitiveRejection, true)
+      assert.equal(error.retryable, false)
+      assert.match(error.message, /update the Host and reconnect/u)
+      return true
+    })
+  }
 })
 
 function host(handler: (request: { method: string; payload: Record<string, unknown>; rpcId: string }) => unknown): typeof fetch {

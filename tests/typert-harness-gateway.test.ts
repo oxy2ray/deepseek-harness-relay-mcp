@@ -112,6 +112,45 @@ test('Typert adapter preserves new namespaced business and transient error codes
   })
 })
 
+test('Typert archive operations keep the admitted Peer and explicitly refuse stopActivity', async () => {
+  const typert = new RecordingTypertGateway()
+  const gateway = createTypertHarnessGateway(typert, permissions(), peer)
+
+  assert.deepEqual(await gateway.archiveSession('session-1'), { archivedSessionIds: ['session-1'] })
+  assert.deepEqual(await gateway.unarchiveSession('session-1'), { archivedSessionIds: [] })
+  assert.deepEqual(typert.invokeCalls.slice(-2).map(({ namespace, method, args, peer: actualPeer }) => ({
+    namespace, method, args, samePeer: actualPeer === peer,
+  })), [
+    { namespace: 'workspace', method: 'archiveSession', args: { request: { sessionId: 'session-1', stopActivity: false } }, samePeer: true },
+    { namespace: 'workspace', method: 'unarchiveSession', args: { request: { sessionId: 'session-1' } }, samePeer: true },
+  ])
+})
+
+test('Typert archive preserves native active-session rejection and translates a missing method', async () => {
+  const active = createTypertHarnessGateway(new ThrowingTypertGateway('workspace/session-active'), permissions(), peer)
+  await assert.rejects(active.archiveSession('session-1'), (error: unknown) => {
+    assert(error instanceof HostRpcError)
+    assert.equal(error.code, 'workspace/session-active')
+    assert.equal(error.retryable, false)
+    return true
+  })
+
+  const oldHost = createTypertHarnessGateway(new ThrowingTypertGateway('TYPERT_METHOD_NOT_FOUND'), permissions(), peer)
+  await assert.rejects(oldHost.archiveSession('session-1'), (error: unknown) => {
+    assert(error instanceof HostRpcError)
+    assert.equal(error.code, 'HOST_API_INCOMPATIBLE')
+    assert.match(error.message, /update the Host and reconnect/u)
+    return true
+  })
+
+  const unrelatedMissing = createTypertHarnessGateway(new ThrowingTypertGateway('TYPERT_METHOD_NOT_FOUND'), permissions(), peer)
+  await assert.rejects(unrelatedMissing.listSessions(), (error: unknown) => {
+    assert(error instanceof HostRpcError)
+    assert.equal(error.code, 'TYPERT_METHOD_NOT_FOUND')
+    return true
+  })
+})
+
 test('Typert adapter preserves Host rejection after its Peer is disposed on both call paths', async () => {
   const lifetime = new AbortController()
   const scopedPeer: TypertPeerScope = {
@@ -171,6 +210,8 @@ class RecordingTypertGateway implements TypertGatewayPort {
       return { records: [{ type: 'event', event: event(4) }], hasMore: false }
     }
     if (request.namespace === 'session' && request.method === 'prompt') return { accepted: true }
+    if (request.namespace === 'workspace' && request.method === 'archiveSession') return { archivedSessionIds: ['session-1'] }
+    if (request.namespace === 'workspace' && request.method === 'unarchiveSession') return { archivedSessionIds: [] }
     throw new Error(`unexpected invocation ${request.namespace}.${request.method}`)
   }
 

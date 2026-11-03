@@ -14,6 +14,11 @@ export interface WorkspaceCatalog {
   archivedSessionIds: string[]
 }
 
+/** Complete archived Session id set after an archive mutation. */
+export interface WorkspaceArchiveResult {
+  archivedSessionIds: string[]
+}
+
 export interface SessionSummary {
   sessionId: string
   updatedAt: number
@@ -136,6 +141,10 @@ export interface HarnessEventGatewayProvider {
 export interface HarnessGatewayProvider {
   describeHost(): Promise<Record<string, unknown>>
   listWorkspaces(): Promise<WorkspaceCatalog>
+  /** Optional for compatibility with older Host/provider compositions. */
+  archiveSession?(sessionId: string): Promise<WorkspaceArchiveResult>
+  /** Optional for compatibility with older Host/provider compositions. */
+  unarchiveSession?(sessionId: string): Promise<WorkspaceArchiveResult>
   createWorkspace(path: string): Promise<WorkspaceView>
   listSessions(): Promise<SessionSummary[]>
   createSession(request: SessionCreateRequest): Promise<SessionCreateResult>
@@ -150,6 +159,8 @@ export interface HarnessGatewayProvider {
   openPath(path: string): Promise<void>
   listModels(): Promise<Record<string, unknown>>
   listAgentPresets(): Promise<Record<string, unknown>>
+  /** Optional native provider quota read; unsupported Hosts may omit it. */
+  readProviderQuota?(provider: string, signal?: AbortSignal): Promise<unknown | undefined>
   readPermissionProjection(sessionId: string): Promise<{ currentValue?: unknown }>
   requestPermissionSelection(sessionId: string, preset: PermissionPreset): Promise<{ kind?: unknown }>
   openMuxEvents?: HarnessEventGatewayProvider['openMuxEvents']

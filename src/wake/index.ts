@@ -1,0 +1,11 @@
+// Experimental library only. Existing Relay entry points do not activate it.
+export { WakeStore } from './store.js'
+export { WakeOutbox, WakeCursorExpiredError, type WakeLimits } from './outbox.js'
+export { collectWakeEvents, type WakeRunSource } from './collector.js'
+export { WakeDispatcher, type WakeHost, type WakeHostCapabilities, type Admission, type Completion, type Recovery, type DispatcherOptions } from './dispatcher.js'
+export { wakeDiagnostics } from './diagnostics.js'
+export type { WakeBinding, WakeWatch, WakeEvent, WakeDelivery, WakeState, EventKind } from './schema.js'
+export { WakeRuntime } from './runtime.js'
+export { OwnedCodexHost } from './owned-codex-host.js'
+export { NativeRelayWakeSource } from './relay-client.js'
+export { callWakeTool, wakeTools, type WakeToolContext } from './tools.js'

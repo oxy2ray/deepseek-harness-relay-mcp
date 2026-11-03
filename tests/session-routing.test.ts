@@ -58,6 +58,146 @@ test('latest-idle creates a fresh session when no reusable conversation exists',
   assert.deepEqual(result, { sessionId: 'created', reused: false, agentPreset: null })
 })
 
+test('fresh session rejects a Host response that commits a different selected preset', async () => {
+  const requests: Array<{ workspaceId: string; agentPreset?: string }> = []
+  const routing = new SessionRoutingFacade({
+    async listSessions() { return [] },
+    async createSession(request) {
+      requests.push(request)
+      return { sessionId: 'native-session-id', agentPreset: 'host-normalized-preset' }
+    },
+  })
+
+  await assert.rejects(
+    routing.resolve(workspace, { agentPreset: 'selected-preset', archivedSessionIds: [] }),
+    /different agentPreset than requested/iu,
+  )
+
+  assert.deepEqual(requests, [{ workspaceId: workspace.workspaceId, agentPreset: 'selected-preset' }])
+})
+
+test('fresh session succeeds when the Host response confirms the exact requested preset', async () => {
+  const routing = new SessionRoutingFacade({
+    async listSessions() { throw new Error('creation response already confirms the preset') },
+    async createSession(request) {
+      assert.deepEqual(request, { workspaceId: workspace.workspaceId, agentPreset: 'selected-preset' })
+      return { sessionId: 'native-session-id', agentPreset: 'selected-preset' }
+    },
+  })
+
+  const result = await routing.resolve(workspace, { agentPreset: 'selected-preset', archivedSessionIds: [] })
+
+  assert.deepEqual(result, { sessionId: 'native-session-id', reused: false, agentPreset: 'selected-preset' })
+})
+
+test('missing create preset is verified from the exact new main session in the selected workspace', async () => {
+  let listCalls = 0
+  const routing = new SessionRoutingFacade({
+    async listSessions() {
+      listCalls += 1
+      return [
+        summary('unrelated', 99, { agentPreset: 'selected-preset' }),
+        summary('new-session', 1, { agentPreset: 'selected-preset' }),
+      ]
+    },
+    async createSession() { return { sessionId: 'new-session' } },
+  })
+
+  const result = await routing.resolve(workspace, { agentPreset: 'selected-preset', archivedSessionIds: [] })
+
+  assert.equal(listCalls, 1)
+  assert.deepEqual(result, { sessionId: 'new-session', reused: false, agentPreset: 'selected-preset' })
+})
+
+test('missing create preset fails when live projection is absent or reports a different preset', async () => {
+  const cases: Array<{ name: string; listed: SessionSummary[]; message: RegExp }> = [
+    { name: 'no exact new session', listed: [summary('other', 1, { agentPreset: 'selected-preset' })], message: /could not be verified in the selected workspace/iu },
+    { name: 'different actual preset', listed: [summary('new-session', 1, { agentPreset: 'host-default' })], message: /different agentPreset than requested/iu },
+    { name: 'preset absent from projection', listed: [summary('new-session', 1)], message: /could not be verified$/iu },
+  ]
+  for (const scenario of cases) {
+    const routing = new SessionRoutingFacade({
+      async listSessions() { return scenario.listed },
+      async createSession() { return { sessionId: 'new-session' } },
+    })
+    await assert.rejects(
+      routing.resolve(workspace, { agentPreset: 'selected-preset', archivedSessionIds: [] }),
+      scenario.message,
+      scenario.name,
+    )
+  }
+})
+
+test('missing create preset is not verified from a subagent or another workspace path', async () => {
+  const noCwd = summary('new-session', 1, { agentPreset: 'selected-preset' })
+  delete noCwd.cwd
+  for (const listed of [
+    [summary('new-session', 1, { agentPreset: 'selected-preset', origin: 'subagent' })],
+    [summary('new-session', 1, { agentPreset: 'selected-preset', cwd: 'D:\\AI\\other' })],
+    [noCwd],
+  ]) {
+    const routing = new SessionRoutingFacade({
+      async listSessions() { return listed },
+      async createSession() { return { sessionId: 'new-session' } },
+    })
+    await assert.rejects(
+      routing.resolve(workspace, { agentPreset: 'selected-preset', archivedSessionIds: [] }),
+      /could not be verified in the selected workspace/iu,
+    )
+  }
+})
+
+test('selected preset with latest-idle creates a fresh session instead of reusing a different preset', async () => {
+  const requests: Array<{ workspaceId: string; agentPreset?: string }> = []
+  const routing = new SessionRoutingFacade({
+    async listSessions() { return [summary('latest', 100, { agentPreset: 'existing-preset' })] },
+    async createSession(request) {
+      requests.push(request)
+      return { sessionId: 'new-session', agentPreset: 'selected-preset' }
+    },
+  })
+
+  const result = await routing.resolve(workspace, {
+    sessionMode: 'latest-idle', agentPreset: 'selected-preset', archivedSessionIds: [],
+  })
+
+  assert.deepEqual(requests, [{ workspaceId: workspace.workspaceId, agentPreset: 'selected-preset' }])
+  assert.deepEqual(result, { sessionId: 'new-session', reused: false, agentPreset: 'selected-preset' })
+})
+
+test('explicit reuse preserves the existing preset and rejects a different requested preset without creating', async () => {
+  let creates = 0
+  const routing = new SessionRoutingFacade(client([
+    summary('latest', 100, { agentPreset: 'cordis' }),
+  ], () => { creates += 1 }))
+
+  const samePreset = await routing.resolve(workspace, {
+    sessionId: 'latest', agentPreset: 'cordis', archivedSessionIds: [],
+  })
+  assert.deepEqual(samePreset, { sessionId: 'latest', reused: true, agentPreset: 'cordis' })
+  await assert.rejects(
+    routing.resolve(workspace, { sessionId: 'latest', agentPreset: 'standard', archivedSessionIds: [] }),
+    /agentPreset can only be selected when creating a fresh session/iu,
+  )
+  assert.equal(creates, 0, 'explicit reuse never replaces the existing composition')
+})
+
+test('omitting the preset forwards no override and reports the Host default', async () => {
+  const requests: Array<{ workspaceId: string; agentPreset?: string }> = []
+  const routing = new SessionRoutingFacade({
+    async listSessions() { return [] },
+    async createSession(request) {
+      requests.push(request)
+      return { sessionId: 'host-default-session', agentPreset: 'host-default-preset' }
+    },
+  })
+
+  const result = await routing.resolve(workspace, { archivedSessionIds: [] })
+
+  assert.deepEqual(requests, [{ workspaceId: workspace.workspaceId }], 'an omitted preset must not override the Host default')
+  assert.deepEqual(result, { sessionId: 'host-default-session', reused: false, agentPreset: 'host-default-preset' })
+})
+
 test('explicit reuse rejects archived, missing, and running sessions', async () => {
   const routing = new SessionRoutingFacade(client([
     summary('running', 90, { running: true }),

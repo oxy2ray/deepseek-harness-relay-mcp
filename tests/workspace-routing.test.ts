@@ -1,11 +1,11 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, realpath, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 import test, { type TestContext } from 'node:test'
 import { resolveConfig } from '../src/config.js'
 import { RelayFacade } from '../src/relay-broker/index.js'
-import type { WorkspaceView } from '../src/workspace-routing/index.js'
+import { WorkspaceRoutingFacade, type WorkspaceView } from '../src/workspace-routing/index.js'
 
 test('registry policy allows a registered workspace outside Host cwd without creating it', async t => {
   const fixture = await workspaceFixture(t)
@@ -93,6 +93,67 @@ test('configured roots allow creating an unregistered workspace', async t => {
   assert.equal(service.workspaceId, 'workspace-project')
   assert.equal(service.workspace, fixture.project)
   assert.equal(creates, 1)
+})
+
+test('registration resolution allows a new directory under configured roots and is idempotent for registered paths', async t => {
+  const fixture = await workspaceFixture(t)
+  const allowedRoot = join(fixture.host, 'allowed')
+  const newDirectory = join(allowedRoot, 'new-workspace')
+  const registeredDirectory = join(allowedRoot, 'registered-workspace')
+  const alias = join(allowedRoot, 'registered-alias')
+  await Promise.all([mkdir(newDirectory, { recursive: true }), mkdir(registeredDirectory, { recursive: true })])
+  await symlink(registeredDirectory, alias)
+  let createCalls = 0
+  const client = {
+    listWorkspaces: async () => ({ items: [view(registeredDirectory)], archivedSessionIds: [] }),
+    createWorkspace: async () => { createCalls += 1; throw new Error('resolution must not create a workspace') },
+  }
+  const routing = new WorkspaceRoutingFacade(client, [allowedRoot])
+
+  const createdCandidate = await routing.resolveRegistration(newDirectory)
+  assert.deepEqual(createdCandidate, { path: await realpath(newDirectory), workspace: null })
+  const existing = await routing.resolveRegistration(alias)
+  assert.equal(existing.path, await realpath(registeredDirectory), 'an in-root symlink resolves to the canonical registered directory')
+  assert.equal(existing.workspace?.workspaceId, 'workspace-project')
+  assert.equal(createCalls, 0)
+})
+
+test('registry-only registration resolution is idempotent for registered exact paths and denies new paths with configuration guidance', async t => {
+  const fixture = await workspaceFixture(t)
+  let createCalls = 0
+  const client = {
+    listWorkspaces: async () => ({ items: [view(fixture.project)], archivedSessionIds: [] }),
+    createWorkspace: async () => { createCalls += 1; throw new Error('resolution must not create a workspace') },
+  }
+  const routing = new WorkspaceRoutingFacade(client, [])
+
+  const existing = await routing.resolveRegistration(fixture.project)
+  assert.equal(existing.workspace?.workspaceId, 'workspace-project')
+  assert.equal(existing.path, fixture.project)
+  await assert.rejects(
+    routing.resolveRegistration(fixture.host),
+    /configure DSH_RELAY_ALLOWED_WORKSPACE_ROOTS to authorize new workspace registration/iu,
+  )
+  assert.equal(createCalls, 0)
+})
+
+test('registration resolution rejects missing, non-directory, prefix-sibling and out-of-root symlink paths', async t => {
+  const fixture = await workspaceFixture(t)
+  const allowedRoot = join(fixture.host, 'allowed')
+  const sibling = `${allowedRoot}-sibling`
+  await Promise.all([mkdir(allowedRoot), mkdir(sibling)])
+  const outsideDirectory = join(sibling, 'outside')
+  await mkdir(outsideDirectory)
+  const outsideLink = join(allowedRoot, 'outside-link')
+  await symlink(outsideDirectory, outsideLink)
+  const file = join(allowedRoot, 'not-a-directory')
+  await writeFile(file, 'fixture')
+  const routing = new WorkspaceRoutingFacade({ listWorkspaces: async () => ({ items: [], archivedSessionIds: [] }) }, [allowedRoot])
+
+  await assert.rejects(routing.resolveRegistration(join(allowedRoot, 'missing')), /ENOENT|no such file/iu)
+  await assert.rejects(routing.resolveRegistration(file), /workspace must be a directory/iu)
+  await assert.rejects(routing.resolveRegistration(outsideDirectory), /outside DSH_RELAY_ALLOWED_WORKSPACE_ROOTS/iu)
+  await assert.rejects(routing.resolveRegistration(outsideLink), /outside DSH_RELAY_ALLOWED_WORKSPACE_ROOTS/iu)
 })
 
 interface Request {

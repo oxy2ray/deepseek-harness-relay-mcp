@@ -62,6 +62,94 @@ test('in-process gateway normalizes official client business errors', async () =
   )
 })
 
+test('in-process archive operations use explicit stopActivity false and return the complete archive set', async () => {
+  const requests: Array<{ method: string; payload: Record<string, unknown> }> = []
+  const handler = new InProcessDispatchHandler({
+    fetch: async (_input, init) => {
+      const request = parseRequest(init?.body)
+      const body = JSON.parse(String(init?.body)) as { payload: Record<string, unknown> }
+      requests.push({ method: request.method, payload: body.payload })
+      return Response.json({
+        rpcId: request.rpcId,
+        result: { ok: true, value: { archivedSessionIds: request.method === 'workspace.archiveSession' ? ['session-1'] : [] } },
+      })
+    },
+  })
+  const gateway = createInProcessHarnessGateway(fakeOfficialClient(handler), nativePermissions(), handler)
+
+  assert.deepEqual(await gateway.archiveSession('session-1'), { archivedSessionIds: ['session-1'] })
+  assert.deepEqual(await gateway.unarchiveSession('session-1'), { archivedSessionIds: [] })
+  assert.deepEqual(requests, [
+    { method: 'workspace.archiveSession', payload: { sessionId: 'session-1', stopActivity: false } },
+    { method: 'workspace.unarchiveSession', payload: { sessionId: 'session-1' } },
+  ])
+})
+
+test('in-process archive methods retain the official workspace client receiver', async () => {
+  const marker = Symbol('official-workspace-client')
+  const workspaceClient = {
+    marker,
+    async archiveSession(this: { marker: symbol }, _request: { sessionId: string; stopActivity: false }) {
+      assert.equal(this.marker, marker)
+      return { rpcId: 'archive', result: { ok: true as const, value: { archivedSessionIds: ['session-1'] } } }
+    },
+    async unarchiveSession(this: { marker: symbol }, _request: { sessionId: string }) {
+      assert.equal(this.marker, marker)
+      return { rpcId: 'unarchive', result: { ok: true as const, value: { archivedSessionIds: [] } } }
+    },
+  }
+  const client = { workspace: workspaceClient } as unknown as InProcessApiClientPort
+  const handler = new InProcessDispatchHandler({ fetch: async () => { throw new Error('unexpected dispatch') } })
+  const gateway = createInProcessHarnessGateway(client, nativePermissions(), handler)
+
+  assert.deepEqual(await gateway.archiveSession('session-1'), { archivedSessionIds: ['session-1'] })
+  assert.deepEqual(await gateway.unarchiveSession('session-1'), { archivedSessionIds: [] })
+})
+
+test('in-process archive preserves Host active-session refusal without retrying or stopping activity', async () => {
+  const handler = new InProcessDispatchHandler({
+    fetch: async (_input, init) => {
+      const request = parseRequest(init?.body)
+      return Response.json({
+        rpcId: request.rpcId,
+        result: { ok: false, error: { code: 'workspace/session-active', message: 'session has running work' } },
+      })
+    },
+  })
+  const gateway = createInProcessHarnessGateway(fakeOfficialClient(handler), nativePermissions(), handler)
+
+  await assert.rejects(gateway.archiveSession('session-1'), (error: unknown) => {
+    assert(error instanceof HostRpcError)
+    assert.equal(error.code, 'workspace/session-active')
+    assert.equal(error.retryable, false)
+    return true
+  })
+})
+
+test('in-process adapter rejects old clients without dispatching archive operations', async () => {
+  let dispatched = false
+  const client = {
+    workspace: { async list() { throw new Error('unexpected') }, async create() { throw new Error('unexpected') } },
+  } as unknown as InProcessApiClientPort
+  const handler = new InProcessDispatchHandler({
+    fetch: async () => { dispatched = true; return Response.json({}) },
+  })
+  const gateway = createInProcessHarnessGateway(client, nativePermissions(), handler)
+
+  await assert.rejects(gateway.archiveSession('session-1'), (error: unknown) => {
+    assert(error instanceof HostRpcError)
+    assert.equal(error.code, 'HOST_API_INCOMPATIBLE')
+    assert.match(error.message, /workspace\.archiveSession/u)
+    return true
+  })
+  await assert.rejects(gateway.unarchiveSession('session-1'), (error: unknown) => {
+    assert(error instanceof HostRpcError)
+    assert.equal(error.code, 'HOST_API_INCOMPATIBLE')
+    return true
+  })
+  assert.equal(dispatched, false)
+})
+
 test('dispatch observer rejects method drift before the Host handler runs', async () => {
   let dispatched = false
   const handler = new InProcessDispatchHandler({
@@ -98,7 +186,10 @@ function fakeOfficialClient(handler: InProcessDispatchHandler): InProcessApiClie
       selectModel: 'session.selectModel', prompt: 'session.prompt',
       updateQueue: 'session.updateQueue', cancel: 'session.cancel',
     },
-    workspace: { list: 'workspace.list', create: 'workspace.create' },
+    workspace: {
+      list: 'workspace.list', create: 'workspace.create',
+      archiveSession: 'workspace.archiveSession', unarchiveSession: 'workspace.unarchiveSession',
+    },
     host: { describe: 'host.describe', openPath: 'host.openPath' },
     settings: { describe: 'settings.describe', replace: 'settings.replace', mutate: 'settings.mutate' },
     llm: { models: 'llm.models' },

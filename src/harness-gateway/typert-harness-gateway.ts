@@ -1,6 +1,6 @@
 import type { ModelSelection, PermissionPreset, PromptPart, RpcEvent } from '../types.js'
 import type { PermissionGateway } from '../permission-gateway/index.js'
-import { HostRpcError, typertGatewayError } from './host-errors.js'
+import { HostRpcError, hostApiIncompatible, isMissingHostMethod, typertGatewayError } from './host-errors.js'
 import type {
   BeforeDispatch,
   HarnessGatewayProvider,
@@ -13,6 +13,7 @@ import type {
   SessionSummary,
   SettingsDescription,
   WorkspaceCatalog,
+  WorkspaceArchiveResult,
   WorkspaceView,
 } from './types.js'
 
@@ -63,6 +64,12 @@ interface SessionPageValue {
   hasMore: boolean
 }
 
+const PROVIDER_QUOTA_METHODS: Readonly<Record<string, { namespace: string; method: string }>> = {
+  'opencode-go': { namespace: 'opencodeUsage', method: 'usage' },
+  ark: { namespace: 'arkAgentPlanUsage', method: 'usage' },
+}
+const PROVIDER_QUOTA_TIMEOUT_MS = 5_000
+
 interface SessionListValue {
   items: Array<SessionSummary & {
     projections?: {
@@ -92,6 +99,20 @@ export class TypertHarnessGateway implements HarnessGatewayProvider {
     const frame = await this.firstStreamValue<WorkspaceFollowBaseline>('workspace.follow', 'workspace', 'follow', {})
     if (frame.type !== 'baseline') throw incompatibleFrame('workspace.follow', 'baseline', frame)
     return frame.value
+  }
+
+  async archiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    const result = await this.invoke<WorkspaceArchiveResult>('workspace.archiveSession', 'workspace', 'archiveSession', {
+      request: { sessionId, stopActivity: false },
+    })
+    return { archivedSessionIds: [...result.archivedSessionIds] }
+  }
+
+  async unarchiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    const result = await this.invoke<WorkspaceArchiveResult>('workspace.unarchiveSession', 'workspace', 'unarchiveSession', {
+      request: { sessionId },
+    })
+    return { archivedSessionIds: [...result.archivedSessionIds] }
   }
 
   async createWorkspace(path: string): Promise<WorkspaceView> {
@@ -212,6 +233,37 @@ export class TypertHarnessGateway implements HarnessGatewayProvider {
     return this.invoke('agentPresets.list', 'agentPresets', 'list', {})
   }
 
+  async readProviderQuota(provider: string, signal?: AbortSignal): Promise<unknown | undefined> {
+    const endpoint = Object.hasOwn(PROVIDER_QUOTA_METHODS, provider) ? PROVIDER_QUOTA_METHODS[provider] : undefined
+    if (endpoint === undefined) return undefined
+    const controller = new AbortController()
+    const combinedSignal = signal === undefined
+      ? AbortSignal.any([this.peer.signal, controller.signal])
+      : AbortSignal.any([this.peer.signal, signal, controller.signal])
+    let timer: NodeJS.Timeout | undefined
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => {
+        controller.abort()
+        reject(new HostRpcError('Provider quota read exceeded its time limit', false, 'HOST_TIMEOUT', true))
+      }, PROVIDER_QUOTA_TIMEOUT_MS)
+    })
+    try {
+      const invocation = this.gateway.invoke({
+        namespace: endpoint.namespace,
+        method: endpoint.method,
+        args: {},
+        peer: this.peer,
+        signal: combinedSignal,
+      })
+      return await Promise.race([invocation, timeout])
+    } catch (error: unknown) {
+      if (isMissingHostMethod(error)) return undefined
+      throw typertGatewayError(`${endpoint.namespace}.${endpoint.method}`, error)
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+    }
+  }
+
   async readPermissionProjection(sessionId: string): Promise<{ currentValue?: unknown }> {
     return { currentValue: await this.permissions.current(sessionId) }
   }
@@ -230,6 +282,11 @@ export class TypertHarnessGateway implements HarnessGatewayProvider {
     try {
       return await this.gateway.invoke({ namespace, method, args, peer: this.peer }) as T
     } catch (error: unknown) {
+      if (namespace === 'workspace'
+        && (method === 'archiveSession' || method === 'unarchiveSession')
+        && isMissingHostMethod(error)) {
+        throw hostApiIncompatible(operation)
+      }
       throw typertGatewayError(operation, error)
     }
   }

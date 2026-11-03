@@ -114,6 +114,7 @@ test('exposes setup and monitoring Facades as read-only MCP tools', async () => 
         provider: 'kimi-coding', model: 'k3',
         reviewTargets: ['docs/plan.md'], contextReadScope: ['.'], excludedPaths: ['secrets'],
         authorizationBasis: 'explicit-user-request',
+        agentPreset: ' custom-preset ',
       },
     })
     assert.equal(dispatched[0]?.sessionMode, 'latest-idle')
@@ -124,6 +125,13 @@ test('exposes setup and monitoring Facades as read-only MCP tools', async () => 
     assert.equal(dispatched[0]?.provider, 'kimi-coding')
     assert.equal(dispatched[0]?.model, 'k3')
     assert.equal(dispatched[0]?.authorizationBasis, 'explicit-user-request')
+    assert.equal(dispatched[0]?.agentPreset, ' custom-preset ', 'native preset IDs must be passed exactly, including significant whitespace')
+    const blankPreset = await client.callTool({ name: 'start_review', arguments: {
+      workspace: 'D:\\work\\demo', task: 'review', provider: 'kimi-coding', model: 'k3',
+      authorizationBasis: 'explicit-user-request', agentPreset: '   ',
+    } })
+    assert.equal(blankPreset.isError, true)
+    assert.equal(dispatched.length, 1)
 
     const waitRun = tools.tools.find(item => item.name === 'wait_run')
     const startRun = tools.tools.find(item => item.name === 'start_run')

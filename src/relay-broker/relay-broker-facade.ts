@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto'
+import { projectAgentPresetCatalog, type AgentPresetCatalog } from '../agent-presets/index.js'
 import { openUrl, sessionUrl } from '../browser-opener.js'
 import type { RelayConfig } from '../config.js'
 import { createHttpHarnessGateway, HostRpcError, type HarnessGatewayFacade } from '../harness-gateway/index.js'
+import { projectProviderQuotaCatalog, type ProviderQuotaCatalog } from '../provider-quotas/index.js'
 import { ModelSelectionFacade } from '../model-selection.js'
 import { ExternalPermissionProvider, PermissionGatewayFacade } from '../permission-gateway/index.js'
 import { PACKAGE_NAME } from '../product-identity/index.js'
@@ -23,6 +25,17 @@ import type { RelayFacadeOptions } from './relay-facade-options.js'
 import { inheritTaskScope, operationRequest, resolveTaskScope, type StartRunInput, validateStartRunInput } from './run-input.js'
 
 interface ServiceRecord extends ServiceSnapshot {}
+
+export interface WorkspaceRegistrationResult {
+  registered: true
+  workspace: { workspaceId: string; path: string; title: string; sessionCount: number }
+}
+
+export interface SessionArchiveResult {
+  workspace: { workspaceId: string; path: string; title: string }
+  sessionId: string
+  archived: boolean
+}
 
 export class RelayFacade {
   private readonly gateway: HarnessGatewayFacade
@@ -174,6 +187,76 @@ export class RelayFacade {
     }
   }
 
+  /** Register only directories admitted by the trusted, user-configured root policy. */
+  async registerWorkspace(workspacePath: string): Promise<WorkspaceRegistrationResult> {
+    await this.ready
+    const resolution = await this.workspaceRouting.resolveRegistration(workspacePath)
+    let workspace = resolution.workspace
+    if (workspace === null) {
+      const created = await this.gateway.createWorkspace(resolution.path)
+      // Confirm the authoritative registry rather than trusting a transport acknowledgement.
+      const confirmed = await this.workspaceRouting.resolveRegistration(workspacePath)
+      if (confirmed.workspace === null || confirmed.workspace.workspaceId !== created.workspaceId
+        || confirmed.path !== resolution.path) {
+        throw new HostRpcError('Workspace registration could not be verified; inspect list_workspaces before retrying.', false, 'WORKSPACE_REGISTRATION_UNVERIFIED', false)
+      }
+      workspace = confirmed.workspace
+    }
+    return { registered: true, workspace: { workspaceId: workspace.workspaceId, path: workspace.path,
+      title: workspace.title, sessionCount: workspace.sessionIds.length } }
+  }
+
+  async archiveSession(input: { workspace: string; sessionId: string }): Promise<SessionArchiveResult> {
+    return this.setSessionArchived(input, true)
+  }
+
+  async unarchiveSession(input: { workspace: string; sessionId: string }): Promise<SessionArchiveResult> {
+    return this.setSessionArchived(input, false)
+  }
+
+  private async setSessionArchived(input: { workspace: string; sessionId: string }, archived: boolean): Promise<SessionArchiveResult> {
+    await this.ready
+    if (!input.sessionId.trim() || input.sessionId.length > 160) throw new Error('A bounded sessionId is required')
+    if (this.sessionStarts.has(input.sessionId)) throw new RelayError('SESSION_BUSY', 'Another operation owns this session; inspect its status before retrying.', false)
+    this.sessionStarts.add(input.sessionId)
+    let lease: Awaited<ReturnType<RelayStateStore['acquireSessionLease']>> | undefined
+    try {
+      lease = await this.stateStore.acquireSessionLease(input.sessionId)
+      const resolution = await this.workspaceRouting.resolve(input.workspace)
+      const workspace = resolution.workspace
+      if (workspace === null) throw new Error('workspace is allowed but not registered in Harness')
+      const catalog = await this.workspaceRouting.listRegistered()
+      const current = catalog.items.find(item => item.workspaceId === workspace.workspaceId && item.path === workspace.path)
+      if (!current?.sessionIds.includes(input.sessionId)) throw new RelayError('SESSION_SCOPE_MISMATCH', 'Session does not belong to the selected registered workspace.', false)
+      const sessions = await this.sessionRouting.list(current, catalog.archivedSessionIds)
+      const session = sessions.find(item => item.sessionId === input.sessionId)
+      if (session === undefined) throw new RelayError('SESSION_UNAVAILABLE', 'Session identity and workspace ownership could not be verified.', false)
+      if (archived) {
+        if (session.running) throw new RelayError('SESSION_ACTIVE', 'Active sessions cannot be archived; no work was stopped.', false)
+        for (const run of this.runs.values()) {
+          if (run.snapshot.sessionId !== input.sessionId) continue
+          if (this.interactions?.hasPending(run.snapshot.runId)) throw new RelayError('SESSION_ACTIVE', 'Resolve the pending session interaction before archiving; no work was stopped.', false)
+          if (['running', 'unknown', 'needs_attention'].includes(run.snapshot.status)) {
+            await this.reconciler.refresh(run)
+            await this.persistState()
+          }
+          if (['running', 'unknown', 'needs_attention'].includes(run.snapshot.status)
+            || run.snapshot.attentionReason === 'permission_restore_failed') {
+            throw new RelayError('SESSION_ACTIVE', 'Reconcile unfinished Relay work or permission restoration before archiving; no work was stopped.', false)
+          }
+        }
+      }
+      // Use the native Host activity guard too; adapters always send stopActivity:false.
+      const result = archived ? await this.gateway.archiveSession(input.sessionId) : await this.gateway.unarchiveSession(input.sessionId)
+      if (result.archivedSessionIds.includes(input.sessionId) !== archived) {
+        throw new HostRpcError('Session archive state was not confirmed; inspect list_workspace_sessions before retrying.', false, 'SESSION_ARCHIVE_UNVERIFIED', false)
+      }
+      return { workspace: { workspaceId: current.workspaceId, path: current.path, title: current.title }, sessionId: input.sessionId, archived }
+    } finally {
+      try { await lease?.release() } finally { this.sessionStarts.delete(input.sessionId) }
+    }
+  }
+
   async stopService(serviceId: string): Promise<ServiceSnapshot> {
     await this.ready
     const service = this.requireService(serviceId)
@@ -291,7 +374,7 @@ export class RelayFacade {
         status: 'running',
         modelSelection: selection,
         permissionPreset,
-        agentPreset: input.agentPreset ?? session.agentPreset,
+        agentPreset: session.agentPreset,
         modelDefaultRestore: restore,
         warnings,
         task: prompt.summary,
@@ -566,13 +649,34 @@ export class RelayFacade {
     await this.ready
     const [models, presets] = await Promise.all([
       this.gateway.listModels(),
-      this.gateway.listAgentPresets(),
+      this.listAgentPresets(),
     ])
+    const providerQuotas = await projectProviderQuotaCatalog(models, (provider, signal) => this.gateway.readProviderQuota(provider, signal))
     return {
       models,
       presets,
+      providerQuotas,
       permissionPresets: ['read-only', 'workspace-write', 'danger-full-access'],
     }
+  }
+
+  async listProviderQuotas(providers?: readonly string[]): Promise<ProviderQuotaCatalog> {
+    await this.ready
+    const models = await this.gateway.listModels()
+    try {
+      return await projectProviderQuotaCatalog(models, (provider, signal) => this.gateway.readProviderQuota(provider, signal), providers)
+    } catch (error) {
+      if (error instanceof TypeError) {
+        throw new RelayError('INVALID_PROVIDER_FILTER', 'providers must be unique exact IDs in the current model catalog (maximum 32)', false)
+      }
+      throw error
+    }
+  }
+
+  /** Query native published metadata on every call; never infer UI-localized copy. */
+  async listAgentPresets(): Promise<AgentPresetCatalog> {
+    await this.ready
+    return projectAgentPresetCatalog(await this.gateway.listAgentPresets())
   }
 
   private async restoreState(): Promise<void> {

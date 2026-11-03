@@ -28,6 +28,7 @@ export type {
   SettingsDescription,
   SettingsNamespace,
   WorkspaceCatalog,
+  WorkspaceArchiveResult,
   WorkspaceView,
 } from './types.js'
 

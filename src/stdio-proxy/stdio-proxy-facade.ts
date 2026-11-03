@@ -7,6 +7,8 @@ import { createProductToolCatalog } from '../mcp-server/index.js'
 import { HarnessHostAutostartFacade } from './host-autostart-facade.js'
 import { ProxyDiagnosticsFacade, type ProxyInspection } from './proxy-diagnostics-facade.js'
 import type { ProxyDoctorReport, ProxyRouteFailure, StdioProxyConfig, StdioProxyDependencies } from './types.js'
+import { callWakeTool, wakeTools, WakeCursorExpiredError } from '../wake/index.js'
+import type { RunSnapshot } from '../types.js'
 
 const principalPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u
 const relayVersion = typeof __DSH_RELAY_VERSION__ === 'string' ? __DSH_RELAY_VERSION__ : 'development'
@@ -31,7 +33,7 @@ export class StdioProxyFacade {
     { name: 'dsh-relay-proxy', version: relayVersion },
     {
       capabilities: { tools: { listChanged: true } },
-      instructions: 'Local-first stdio proxy to the embedded Harness Relay authority. Run doctor when only one tool is listed.',
+      instructions: 'Local-first stdio proxy to the embedded Harness Relay authority. Use doctor to verify connectivity even if cached tool schemas are listed. Discover live models, presets and providerQuotas before dispatch. Ordinary stdio does not enable wake. Only when this proxy offers watch_run and every delegated run returns structured acknowledged=true plus hostMayConcludeTurn=true may this host turn end awaiting events. This is not task completion: retrieve get_run on wake and verify assistantText. Otherwise continue native wait_run to terminal. Never use a shell RPC client.',
     },
   )
   private readonly diagnostics: ProxyDiagnosticsFacade
@@ -78,14 +80,14 @@ export class StdioProxyFacade {
     const remote = this.remote
     if (remote === null) {
       this.beginRemoteRefresh()
-      return { tools: cursor === undefined ? await this.localToolCatalog() : [] }
+      return { tools: cursor === undefined ? [...await this.localToolCatalog(), ...(this.config.wake ? wakeTools : [])] : [] }
     }
     try {
       const page = await remote.listTools(cursor === undefined ? undefined : { cursor }, { timeout: this.config.requestTimeoutMs })
       this.lastError = null
       return {
         tools: cursor === undefined
-          ? [doctorTool, ...page.tools.filter(tool => tool.name !== doctorTool.name)]
+          ? [doctorTool, ...page.tools.filter(tool => tool.name !== doctorTool.name && (!this.config.wake || !wakeTools.some(w => w.name === tool.name))), ...(this.config.wake ? wakeTools : [])]
           : page.tools.filter(tool => tool.name !== doctorTool.name),
         ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
       }
@@ -96,6 +98,23 @@ export class StdioProxyFacade {
   }
 
   private async callTool(name: string, args: Record<string, unknown> | undefined): Promise<object> {
+    if (this.config.wake && wakeTools.some(tool => tool.name === name)) {
+      try {
+        const result = await callWakeTool(this.config.wake, this.config.clientPrincipalId, name, args ?? {}, async runId => {
+          const remote = await this.callTool('get_run', { runId }) as { isError?: boolean; structuredContent?: RunSnapshot }
+          if (remote.isError || !remote.structuredContent) throw new Error('owned run unavailable')
+          return remote.structuredContent
+        })
+        return { content: [{ type: 'text', text: JSON.stringify(result) }], structuredContent: result }
+      } catch (error) {
+        if (error instanceof WakeCursorExpiredError) return {
+          isError: true,
+          content: [{ type: 'text', text: 'Durable replay cursor expired after acknowledged retention. Resynchronize retained events and verify owned runs with get_run.' }],
+          structuredContent: { code: error.code, resynchronization: { earliestCursor: error.earliestCursor, latestCursor: error.latestCursor, nextAction: 'replay-without-cursor-then-get-run' } },
+        }
+        return { isError: true, content: [{ type: 'text', text: 'Durable wake unavailable or unauthorized. Keep using wait_run; no background-wake acknowledgement was issued.' }] }
+      }
+    }
     if (name === doctorTool.name) {
       if (this.remote === null) this.beginRemoteRefresh()
       const report = await this.diagnostics.doctor(relayVersion, this.remote !== null, this.lastError)

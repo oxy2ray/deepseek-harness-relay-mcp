@@ -69,28 +69,30 @@ test('shared runtime resolver defaults blank home/profile values and isolates ho
 })
 
 test('shared runtime resolver honors explicit home/profile, state, token, and endpoint paths', () => {
+  // Runtime paths use the current platform's path semantics.
+  const root = join(tmpdir(), 'relay-runtime-explicit')
   const paths = resolveRelayRuntimePaths({
     mode: 'embedded',
-    homeDirectory: 'C:\\default-home',
+    homeDirectory: join(root, 'default-home'),
     env: {
-      DSH_HOME: 'C:\\explicit-home',
+      DSH_HOME: join(root, 'explicit-home'),
       DSH_PROFILE: 'web-preview',
-      DSH_RELAY_ENDPOINT_DESCRIPTOR: 'C:\\environment-endpoint.json',
+      DSH_RELAY_ENDPOINT_DESCRIPTOR: join(root, 'environment-endpoint.json'),
     },
     hostIdentity: 'http://localhost:3080',
-    stateDirectory: 'C:\\explicit-state',
-    tokenFile: 'C:\\explicit-token',
-    endpointDescriptorFile: 'C:\\explicit-endpoint.json',
+    stateDirectory: join(root, 'explicit-state'),
+    tokenFile: join(root, 'explicit-token'),
+    endpointDescriptorFile: join(root, 'explicit-endpoint.json'),
   })
-  assert.equal(paths.dshHome, 'C:\\explicit-home')
+  assert.equal(paths.dshHome, join(root, 'explicit-home'))
   assert.equal(paths.dshHomeSource, 'environment')
   assert.equal(paths.profile, 'web-preview')
   assert.equal(paths.profileSource, 'environment')
-  assert.equal(paths.stateDirectory, 'C:\\explicit-state')
-  assert.equal(paths.tokenFile, 'C:\\explicit-token')
-  assert.equal(paths.endpointDescriptorFile, 'C:\\explicit-endpoint.json')
+  assert.equal(paths.stateDirectory, join(root, 'explicit-state'))
+  assert.equal(paths.tokenFile, join(root, 'explicit-token'))
+  assert.equal(paths.endpointDescriptorFile, join(root, 'explicit-endpoint.json'))
   assert.equal(paths.endpointDescriptorSource, 'explicit')
-  assert.equal(paths.statusFile, 'C:\\relay-status.json')
+  assert.equal(paths.statusFile, join(root, 'relay-status.json'))
 })
 
 test('shared runtime resolver reports structured invalid profile and blank overrides', () => {

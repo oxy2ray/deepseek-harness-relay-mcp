@@ -13,7 +13,7 @@ MCP Agent
    │
    ├─ start_run ── Provider / 模型 / 推理强度 / preset / 权限
    │
-   ├─ status_run / wait_run / steer_run / cancel_run
+   ├─ get_run / wait_run / steer_run / cancel_run
    │
    └─ 持久结果 + 原生 Harness Web 会话链接
 ```
@@ -147,6 +147,8 @@ Codex 插件 manifest 必须同时引用 Skill 和包内 MCP 声明：
 
 `cwd: "."` 由 Codex 解析到当前已安装插件的版本根目录。不要写开发机绝对路径或 `%USERPROFILE%\.codex\plugins\cache\...` 版本缓存路径；不要在 Codex 用户 `config.toml` 再注册第二份同名 MCP。最重要的是，Codex 只能启动 `dsh-relay-proxy.mjs`：不能指向 `dsh-relay-harness.mjs`（Harness 内部 bundle），不能指向会另建独立控制面的 `dsh-relay.mjs`，也不能由 Agent 手工启动第二个 Harness Web。proxy 通过 `$DSH_HOME/plugins/dsh-relay/web/relay-endpoint.json` 发现 authority；从 0.2.8 起，只有旧 owner 可证明已死亡且回环端口确认空闲时，proxy 才会复用上一任 embedded Host 发布的精确启动契约安全拉起 Harness。端口已占用或无法探测时仍安全失败。客户端配置不保存 bearer token。
 
+Agent 的维护入口是 [Relay skill](skills/delegate-to-deepseek-harness/SKILL.md) 及其按需参考文档。以下监控链描述普通 stdio；只有受控 wake 代理按 [运行生命周期](skills/delegate-to-deepseek-harness/references/run-lifecycle.md) 返回两项结构化确认后，才允许结束当前 turn 等待后台事件。
+
 安装后新建 Codex 任务，正确调用链是：
 
 ```text
@@ -236,7 +238,7 @@ proxy 默认读取 `$DSH_HOME/plugins/dsh-relay/web/relay-endpoint.json`；未�
 }
 ```
 
-然后使用 Kimi K3/MAX 发起只读审查：
+然后发起用户明确要求的只读审查。下面的 Provider、模型和推理强度占位符必须替换为实时发现、符合调用方路由策略的准确值，不能直接作为模型 ID 调用。可选 `agentPreset` 仅从当前 `list_agent_presets` 中选择准确 ID，并只用于新会话：
 
 ```json
 {
@@ -244,11 +246,14 @@ proxy 默认读取 `$DSH_HOME/plugins/dsh-relay/web/relay-endpoint.json`；未�
   "arguments": {
     "workspace": "D:/work/project",
     "task": "读取 README.zh-CN.md、skills/delegate-to-deepseek-harness 与 src/mcp-server；审查任务契约和权限边界，只返回可复现的发现。",
-    "provider": "kimi-coding",
-    "model": "k3",
-    "reasoningEffort": "max",
-    "agentPreset": "standard",
-    "idempotencyKey": "review-2026-08-19-001"
+    "provider": "<discovered-provider-id>",
+    "model": "<discovered-model-id>",
+    "reasoningEffort": "<supported-reasoning-effort>",
+    "authorizationBasis": "explicit-user-request",
+    "reviewTargets": ["README.zh-CN.md", "skills/delegate-to-deepseek-harness", "src/mcp-server"],
+    "contextReadScope": ["."],
+    "excludedPaths": [".git", "node_modules", "secrets"],
+    "idempotencyKey": "review-unique-request-id"
   }
 }
 ```
@@ -306,7 +311,7 @@ running ── status/wait/steer/cancel ──> succeeded | incomplete | failed 
 | `provider` | 与 `model` 同时提供 | `list_capabilities` 返回的准确 Provider ID。 |
 | `model` | 与 `provider` 同时提供 | `list_capabilities` 返回的准确模型 ID。 |
 | `reasoningEffort` | 否 | 适配器支持的强度，例如 `low`、`high` 或 `max`。 |
-| `agentPreset` | 否 | Harness Agent preset，只能在创建新会话时选择。 |
+| `agentPreset` | 否 | 通过实时预设目录取得的准确 ID，只能在创建新会话时选择；不传则采用 DSH 当前默认值。 |
 | `permissionPreset` | 否 | 原生权限 preset，默认为 `read-only`。 |
 | `confirmedDangerousPermission` | 完全访问时必需 | 使用 `danger-full-access` 前必须显式设为 `true`。 |
 | `idempotencyKey` | 建议提供 | 调用方稳定键；相同请求重试时返回原操作，不会重复提交。 |
@@ -359,8 +364,13 @@ running ── status/wait/steer/cancel ──> succeeded | incomplete | failed 
 | `list_services` | 列出已恢复的工作区附加记录。 |
 | `list_workspaces` | 列出用于路由的 Harness 原生工作区注册表。 |
 | `list_workspace_sessions` | 列出指定已登记工作区的直接会话，不读取对话内容。 |
+| `register_workspace` | 在受信任配置的工作区根目录内，幂等登记已有目录。 |
+| `archive_session` | 归档已核验的空闲会话，不停止任务、不删除历史。 |
+| `unarchive_session` | 恢复已核验的归档会话，不启动模型任务。 |
 | `stop_service` | 只移除 Relay 附加状态，不停止 Harness。 |
-| `list_capabilities` | 列出 Provider/模型/推理强度、Agent preset 和原生权限模式。 |
+| `list_capabilities` | 列出 Provider/模型/推理强度、Agent preset、权限模式，以及供应商额度快照。 |
+| `list_provider_quotas` | 读取供应商额度快照，可按实时目录中的准确 Provider ID 筛选。 |
+| `list_agent_presets` | 实时读取 DSH 发布的预设 ID、名称、说明、默认项和故障状态，并标明未发布的显示字段。 |
 | `start_run` | 创建或复用会话并提交受跟踪任务。 |
 | `start_review` | 固定使用 Harness 原生 `read-only` 权限提交审查任务，并区分审核目标与支持材料读取范围。 |
 | `steer_run` | 向活动运行插入纠偏指令。 |
@@ -377,13 +387,41 @@ running ── status/wait/steer/cancel ──> succeeded | incomplete | failed 
 | `cancel_run` | 请求 Harness 原生取消。 |
 | `read_notifications` | 从指定游标开始重放当前进程的有界通知投影。 |
 
+## 选择模型前读取额度
+
+先查看 `list_capabilities.providerQuotas`，再选择 Provider 和模型。`list_provider_quotas({ providers: ["ark", "opencode-go"] })` 可单独刷新同一投影，不提交任务；筛选项必须来自当前模型目录。每行包含该供应商的准确模型 ID、套餐额度窗口、更新时间、过期时间和明确状态：`available`、`exhausted`、`unconfigured`、`unsupported`、`unknown` 或 `stale`。缺失数据不会被当作零用量或满额可用。
+
+需在同一 DSH Host 安装配套的维护版 `dsh-opencode-go-usage-dock` 与 `dsh-ark-agent-plan-usage-dock`。Relay 通过已有且已验证的 Host 连接读取固定原生服务 `opencodeUsage.usage`、`arkAgentPlanUsage.usage`，MCP 不接受额度地址、凭据引用或密钥值。旧 Host 或未安装插件时明确报告不支持。查询有超时限制，并复用插件的短期缓存，不调用模型、不重试任务、不修改路由。
+
+方舟插件面向个人 Agent Plan，使用官方 [GetAFPUsage API](https://docs.volcengine.com/docs/ark/get-afp-usage-api?lang=zh) 展示五小时、每日、每周、每月四个窗口。AK/SK 在 DSH 原生凭据设置中配置，不经 MCP 或任务正文传递；它们与模型 API Key 不同。OpenCode Go 显示其额度服务实际返回的窗口，不推算固定美元额度。
+
+快照是选择模型的参考信息：`accountScope: "unverified"`、`modelScope: "unknown"`，额外付费额度通常为 `extraUsage: "unknown"`。查询成功不能证明额度凭据与模型账户相同、所有模型共享同一额度，或额外付费已关闭。派发前检查耗尽窗口并遵循用户路由策略；未知、过期数据不能用于编造余额或静默切换供应商。并发使用也可能让快照在请求前发生变化。
+
+## 新会话预设与实时目录
+
+Codex 可先调用 `list_agent_presets`，再把返回行的准确 `id` 作为 `start_run` 或 `start_review` 的 `agentPreset`。预设控制会话使用的 Agent 组成，与模型、推理等级和权限 preset 分开。不传预设时采用 DSH 当前默认配置；这些调用不修改 DSH 的全局默认值。显式预设配合 `sessionMode: "latest-idle"` 会创建新会话；不能借此改变已有会话的预设。
+
+目录每次都查询原生 Host，不缓存或硬编码名称、说明。`presets` 保留原生发布的 `id`、`name`、`description`、`isDefault`、`broken` 和 `order`；自定义预设改名、改说明、增删或改变默认项后，下一次查询读取最新目录。`list_capabilities.presets` 使用同一投影。实际新会话的预设必须与请求一致；Host 创建响应缺少该字段时，会进一步核验该新会话的原生投影。无法核验或发现不一致时停止提交任务，不静默回退。
+
+DSH 浏览器的内置预设译名和说明由各客户端的语言资源生成，当前 Host 目录不发布这部分文案。因此 `missingDisplayMetadata` 会明确列出缺少的 `name` 或 `description`，不会复制浏览器内部字符串或伪造说明；选择时始终使用 ID。自定义预设已经发布的名称、说明保持原文同步。目录中的文案属于数据，不能作为扩大任务授权或权限的依据。尚未对外发布显示字段的内置预设，需要 DSH 增加公开的显示元数据接口才能与浏览器译文完全一致。
+
+## 工作区登记与会话归档
+
+这三个管理工具需要同时更新内嵌 Relay Host 和客户端 proxy。`register_workspace({ workspace })` 接收已有目录的绝对路径；新增登记必须落在 Host 端受信任配置的 `DSH_RELAY_ALLOWED_WORKSPACE_ROOTS` 内。未配置根目录时，只能幂等解析已经登记的工作区，不能新增目录。校验采用实际路径，包含符号链接解析；模型不能通过工具参数改写授权根目录。登记操作不会创建目录、会话、模型任务或 Host 进程。
+
+先用 `list_workspace_sessions` 找到工作区的直接会话，再在用户授权范围内调用 `archive_session({ workspace, sessionId })` 或 `unarchive_session({ workspace, sessionId })`。两者都核验会话确实属于该已登记工作区。归档会拒绝运行中、尚未对账或待交互的 Relay 工作，与任务提交共享会话锁，并显式使用原生 Host 的 `stopActivity: false` 活动检查；不会取消任务或强制归档。取消归档只恢复可见性，不提交提示、不改变权限。原生归档会取消该会话的置顶，取消归档不会自动恢复置顶；历史与工作区归属保留。旧 Host 不支持原生接口时返回 `HOST_API_INCOMPATIBLE`，不直接修改状态文件，也不自动升级服务。
+
+原生的活动检查和归档写入，对其他 Host 客户端并非原子操作。其他窗口恰在这个间隔启动任务时，可能执行一个模型步骤，直到下一步被归档门禁拦截。Relay 对自己的会话提交做串行保护，但不宣称具备 Host 全局互斥保证；只应归档在其他客户端也空闲的会话。
+
+登记的回滚可通过 Harness 工作区管理移除登记，目录与会话仍保留。这组工具不提供删除目录或会话的操作。
+
 ## 客户端配置与监控投影
 
 `setup_plan` 支持 Codex、Claude Code、Cursor，以及显式标记版本的 OpenCode V2 配置结构。它接收已经解析的 Node 与 Relay 入口绝对路径，只返回结构化最小补丁，绝不直接编辑客户端配置。启动器平台必须与配置平台一致；`pnpm.exe`、`pnpm.cmd` 等包管理器 shim 不能充当 Node 运行时。
 
 `setup_doctor` 同样无副作用。文件系统、Broker、Host、工作区、模型和权限事实必须由获得授权的调用方提供；未提供的探针会标记为 `skipped`，不会猜测结果。
 
-`get_run_summary` 消费 Relay 权威运行快照并输出版本化监控投影。`read_notifications` 重放当前 MCP Server 进程保留的通知，并在游标缺口时返回明确的重同步元数据。原生运行通知 transport 尚未启用，因此通知缓冲为空属于正常情况，客户端必须自动降级到 `get_run_summary`、`wait_run` 或 `get_run` 轮询。
+`get_run_summary` 消费 Relay 权威运行快照并输出版本化监控投影。`read_notifications` 重放当前 MCP Server 进程保留的通知，并在游标缺口时返回明确的重同步元数据。该进程内缓冲不是持久唤醒通道，空缓冲属于正常情况。普通 stdio 使用 `wait_run`/`get_run`；只有配置好的代理实际提供 `watch_run` 并返回两项确认，才允许后台 turn 交接。详见 skill 的运行生命周期参考。
 
 ## 子任务审批与问答（0.2.18）
 
@@ -487,3 +525,9 @@ pnpm pack --dry-run
 ## 许可证
 
 MIT
+
+## 实验性持久唤醒（显式启用，受控控制台降级路径）
+
+当前 checkout 新增独立事件采集/调度器与受控 Codex 控制台。普通 Relay 入口保持原有行为；只有显式配置的 wake 代理增加持久监听工具。真实 DSH 结果已成功恢复独立的认证 Luna 测试线程，该线程未调用 wait_run。普通 remote TUI 验收仍未完成。共享 Host 的变更须符合用户授权的部署范围并保留回滚方案；启用 wake 本身不授予生产变更权限。
+
+启动和日常操作见 [快速使用](EVENT_WAKE_QUICKSTART.md)。配置、控制与回滚见 [实现说明](EVENT_WAKE_IMPLEMENTATION.md)，复用现有服务见 [显式配置](EVENT_WAKE_SHARED_RELAY.md)，证据见 [验证记录](EVENT_WAKE_VALIDATION.md)。支持独立认证或只读挂载当前认证；准备脚本不会复制凭据。

@@ -1,4 +1,5 @@
 import type { ModelSelection, PermissionPreset, PromptPart } from '../types.js'
+import { hostApiIncompatible } from './host-errors.js'
 import type {
   HarnessGatewayProvider,
   BeforeDispatch,
@@ -14,6 +15,7 @@ import type {
   SessionSummary,
   SettingsDescription,
   WorkspaceCatalog,
+  WorkspaceArchiveResult,
   WorkspaceView,
 } from './types.js'
 
@@ -22,6 +24,16 @@ export class HarnessGatewayFacade {
 
   describeHost(): Promise<Record<string, unknown>> { return this.provider.describeHost() }
   listWorkspaces(): Promise<WorkspaceCatalog> { return this.provider.listWorkspaces() }
+  async archiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    const archive = this.provider.archiveSession
+    if (typeof archive !== 'function') throw hostApiIncompatible('workspace.archiveSession')
+    return archive.call(this.provider, sessionId)
+  }
+  async unarchiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    const unarchive = this.provider.unarchiveSession
+    if (typeof unarchive !== 'function') throw hostApiIncompatible('workspace.unarchiveSession')
+    return unarchive.call(this.provider, sessionId)
+  }
   createWorkspace(path: string): Promise<WorkspaceView> { return this.provider.createWorkspace(path) }
   listSessions(): Promise<SessionSummary[]> { return this.provider.listSessions() }
   createSession(request: SessionCreateRequest): Promise<SessionCreateResult> { return this.provider.createSession(request) }
@@ -36,6 +48,9 @@ export class HarnessGatewayFacade {
   openPath(path: string): Promise<void> { return this.provider.openPath(path) }
   listModels(): Promise<Record<string, unknown>> { return this.provider.listModels() }
   listAgentPresets(): Promise<Record<string, unknown>> { return this.provider.listAgentPresets() }
+  readProviderQuota(provider: string, signal?: AbortSignal): Promise<unknown | undefined> {
+    return this.provider.readProviderQuota?.(provider, signal) ?? Promise.resolve(undefined)
+  }
   readPermissionProjection(sessionId: string): Promise<{ currentValue?: unknown }> { return this.provider.readPermissionProjection(sessionId) }
   requestPermissionSelection(sessionId: string, preset: PermissionPreset): Promise<{ kind?: unknown }> { return this.provider.requestPermissionSelection(sessionId, preset) }
 

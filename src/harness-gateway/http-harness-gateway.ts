@@ -1,5 +1,6 @@
 import type { ModelSelection, PermissionPreset, PromptPart } from '../types.js'
 import { HttpHostClient } from './http-host-client.js'
+import { HostRpcError, hostApiIncompatible, isMissingHostMethod } from './host-errors.js'
 import type {
   HarnessGatewayProvider,
   BeforeDispatch,
@@ -12,6 +13,7 @@ import type {
   SessionSummary,
   SettingsDescription,
   WorkspaceCatalog,
+  WorkspaceArchiveResult,
   WorkspaceView,
 } from './types.js'
 
@@ -28,6 +30,35 @@ export class HttpHarnessGateway implements HarnessGatewayProvider {
 
   listWorkspaces(): Promise<WorkspaceCatalog> {
     return this.client.call('workspace.list', {})
+  }
+
+  async archiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    let result: WorkspaceArchiveResult
+    try {
+      result = await this.client.call<WorkspaceArchiveResult>('workspace.archiveSession', {
+        sessionId,
+        stopActivity: false,
+      })
+    } catch (error: unknown) {
+      if (isMissingHostMethod(error) || (error instanceof HostRpcError && error.code === 'HOST_HTTP_404')) {
+        throw hostApiIncompatible('workspace.archiveSession')
+      }
+      throw error
+    }
+    return { archivedSessionIds: [...result.archivedSessionIds] }
+  }
+
+  async unarchiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    let result: WorkspaceArchiveResult
+    try {
+      result = await this.client.call<WorkspaceArchiveResult>('workspace.unarchiveSession', { sessionId })
+    } catch (error: unknown) {
+      if (isMissingHostMethod(error) || (error instanceof HostRpcError && error.code === 'HOST_HTTP_404')) {
+        throw hostApiIncompatible('workspace.unarchiveSession')
+      }
+      throw error
+    }
+    return { archivedSessionIds: [...result.archivedSessionIds] }
   }
 
   async createWorkspace(path: string): Promise<WorkspaceView> {

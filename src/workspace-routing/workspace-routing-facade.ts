@@ -56,6 +56,28 @@ export class WorkspaceRoutingFacade {
     return { path: workspace?.path ?? path, workspace }
   }
 
+  /** Resolve a directory for registration without creating or mutating Host state. */
+  async resolveRegistration(input: string): Promise<WorkspaceResolution> {
+    const path = await canonicalDirectory(input)
+    if (this.configuredRoots.length === 0) {
+      const registered = (await this.listRegistered()).items
+      const workspace = registered.find(item => samePath(item.path, path)) ?? null
+      if (workspace === null) {
+        throw new Error('workspace is not registered in Harness; configure DSH_RELAY_ALLOWED_WORKSPACE_ROOTS to authorize new workspace registration')
+      }
+      return { path: workspace.path, workspace }
+    }
+
+    const roots = await Promise.all(this.configuredRoots.map(root => canonicalDirectory(root)))
+    if (!roots.some(root => contains(root, path))) {
+      throw new Error('workspace is outside DSH_RELAY_ALLOWED_WORKSPACE_ROOTS')
+    }
+
+    const registered = (await this.listRegistered()).items
+    const workspace = registered.find(item => samePath(item.path, path)) ?? null
+    return { path: workspace?.path ?? path, workspace }
+  }
+
   async findById(workspaceId: string): Promise<WorkspaceView> {
     const workspace = (await this.listRegistered()).items.find(item => item.workspaceId === workspaceId)
     if (workspace === undefined) throw new Error(`Harness workspace is no longer registered: ${workspaceId}`)

@@ -1,10 +1,12 @@
 import type { RelayEndpointDescriptor } from '../authority/index.js'
 import type { RelayStatusDocument } from '../relay-runtime/index.js'
 import type { ProcessProbe } from '../state-repository/index.js'
+import type { WakeToolContext } from '../wake/index.js'
 
 export type { RelayEndpointDescriptor }
 
 export interface StdioProxyConfig {
+  wake?: WakeToolContext
   descriptorFile: string
   statusFile?: string
   clientPrincipalId: string

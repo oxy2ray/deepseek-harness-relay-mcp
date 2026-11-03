@@ -13,7 +13,7 @@ MCP agent
    │
    ├─ start_run ── provider / model / reasoning / preset / permission
    │
-   ├─ status_run / wait_run / steer_run / cancel_run
+   ├─ get_run / wait_run / steer_run / cancel_run
    │
    └─ durable result + native Harness Web session URL
 ```
@@ -147,6 +147,8 @@ The packaged `.mcp.json` must use the plugin-relative proxy entrypoint:
 
 Codex resolves `cwd: "."` against the installed plugin version root. Do not hard-code a development checkout or a versioned `%USERPROFILE%\.codex\plugins\cache\...` path, and do not register a duplicate server in user `config.toml`. Codex must start only `dsh-relay-proxy.mjs`: never point it at `dsh-relay-harness.mjs` (the internal Harness bundle), `dsh-relay.mjs` (a separate standalone control plane), or manually start another Harness Web. The proxy discovers the authority through `$DSH_HOME/plugins/dsh-relay/web/relay-endpoint.json`. When the recorded owner is provably dead and the loopback port is confirmed free, Relay 0.2.8+ can safely restart the exact launcher contract published by the previous embedded Host; an occupied or unprobeable port still fails closed. Client configuration never stores the bearer token.
 
+For the maintained agent workflow, read [the Relay skill](skills/delegate-to-deepseek-harness/SKILL.md) and its linked references. The following monitoring flow describes ordinary stdio; a managed wake proxy may hand off only after the explicit structured acknowledgment contract in [run lifecycle](skills/delegate-to-deepseek-harness/references/run-lifecycle.md).
+
 In a new Codex task, use `doctor → list_workspaces → list_capabilities`, then `start_review` for analysis or `start_run` with `workspace-write` when the user explicitly delegates implementation. Keep calling `wait_run` to a terminal state, consume `assistantText`, and verify the result. Invoke those operations only as native MCP tool calls from the installed plugin. Never generate a temporary `.tmp/harness-*-call.mjs` client or call/poll Relay through `node`, PowerShell, Python, or another shell: that bypasses managed background transport and can open visible console windows on Windows. If the tools are unavailable, repair or reinstall the plugin and start a new Codex task instead of using a shell fallback. When a user explicitly selects Harness or a Harness model to review or modify the current or named registered workspace, Harness is authorized to read that in-scope workspace itself. The calling task sends only the workspace, file/directory locations, review or implementation scope, acceptance criteria, and routing/permission metadata. Harness reads the named files from the authorized workspace. Both `read-only` and `workspace-write` forbid embedding source bodies, diffs, file dumps, encoded source, or repository archives in `task`, text `content`, `steer_run`, or `reply_run` arguments. Write permission changes what Harness may do, not how source is transferred. This does not authorize credentials, secrets, or unrelated paths.
 
 Restart Codex after installation and start a new Codex task so the new task loads the MCP server and Skill. In that task, ask:
@@ -227,7 +229,7 @@ Then discover the Host capabilities instead of guessing route names:
 }
 ```
 
-Then dispatch a read-only Kimi K3/MAX review:
+Then dispatch an explicitly requested read-only review. Replace the provider/model/reasoning placeholders below with exact values from fresh discovery under the caller's routing policy; they are not executable model IDs. Select an optional `agentPreset` only by a current `list_agent_presets` ID for a new session:
 
 ```json
 {
@@ -235,11 +237,14 @@ Then dispatch a read-only Kimi K3/MAX review:
   "arguments": {
     "workspace": "D:/work/project",
     "task": "Read README.md, skills/delegate-to-deepseek-harness, and src/mcp-server; review the task contract and permission boundary and return reproducible findings only.",
-    "provider": "kimi-coding",
-    "model": "k3",
-    "reasoningEffort": "max",
-    "agentPreset": "standard",
-    "idempotencyKey": "review-2026-08-19-001"
+    "provider": "<discovered-provider-id>",
+    "model": "<discovered-model-id>",
+    "reasoningEffort": "<supported-reasoning-effort>",
+    "authorizationBasis": "explicit-user-request",
+    "reviewTargets": ["README.md", "skills/delegate-to-deepseek-harness", "src/mcp-server"],
+    "contextReadScope": ["."],
+    "excludedPaths": [".git", "node_modules", "secrets"],
+    "idempotencyKey": "review-unique-request-id"
   }
 }
 ```
@@ -297,7 +302,7 @@ running ── status/wait/steer/cancel ──> succeeded | incomplete | failed 
 | `provider` | With `model` | Exact provider ID returned by `list_capabilities`. |
 | `model` | With `provider` | Exact model ID returned by `list_capabilities`. |
 | `reasoningEffort` | No | Adapter-supported effort such as `low`, `high`, or `max`. |
-| `agentPreset` | No | Harness agent preset; selectable only for a fresh session. |
+| `agentPreset` | No | Exact ID from the live preset roster; selectable for a fresh session only. Omit to use the current native Host default. |
 | `permissionPreset` | No | Native permission preset; defaults to `read-only`. |
 | `confirmedDangerousPermission` | For full access | Must be `true` before `danger-full-access` is accepted. |
 | `idempotencyKey` | Recommended | Stable caller key; a retry with the same request returns the original operation instead of resubmitting. |
@@ -350,8 +355,13 @@ For `start_review`, the exact `provider`, exact `model`, and `authorizationBasis
 | `list_services` | List restored workspace attachments. |
 | `list_workspaces` | List the native Harness workspace registry used for routing. |
 | `list_workspace_sessions` | List direct sessions in one registered workspace without reading conversation content. |
+| `register_workspace` | Idempotently register an existing directory within trusted configured workspace roots. |
+| `archive_session` | Archive one verified idle session without stopping work or deleting history. |
+| `unarchive_session` | Restore a verified archived session without starting a model task. |
 | `stop_service` | Detach Relay state without stopping Harness. |
-| `list_capabilities` | List provider/model/reasoning and agent preset choices plus native permission modes. |
+| `list_capabilities` | List provider/model/reasoning, agent presets, permission modes, and advisory provider quota snapshots. |
+| `list_provider_quotas` | Read provider quota snapshots; optionally filter by exact live provider IDs. |
+| `list_agent_presets` | Read current native preset IDs, published names/descriptions, default/broken flags and explicitly missing display fields. |
 | `start_run` | Create or reuse a session and submit a tracked task. |
 | `start_review` | Submit a native `read-only` task with separate review-target and supporting-read scopes. |
 | `steer_run` | Insert a correction into an active run. |
@@ -368,13 +378,41 @@ For `start_review`, the exact `provider`, exact `model`, and `authorizationBasis
 | `cancel_run` | Request native Harness cancellation. |
 | `read_notifications` | Replay the bounded in-process notification projection after a cursor. |
 
+## Provider quotas before model selection
+
+Read `list_capabilities.providerQuotas` before choosing a provider/model. `list_provider_quotas({ providers: ["ark", "opencode-go"] })` refreshes the same projection without submitting a task. Only request provider IDs present in the current model catalog. Each row associates exact model IDs with a provider-plan snapshot, its windows, timestamps and an explicit `available`, `exhausted`, `unconfigured`, `unsupported`, `unknown` or `stale` state. Missing data never means zero usage or a full balance.
+
+Install the companion quota plugins in the same DSH Host: the maintained `dsh-opencode-go-usage-dock` and `dsh-ark-agent-plan-usage-dock`. Relay reads their fixed native `opencodeUsage.usage` and `arkAgentPlanUsage.usage` services through the existing admitted Host connection. It does not accept quota URLs, credential references or secret values through MCP. Older Hosts or absent plugins report unsupported data. Reads have deadlines, use the plugins' short cache, and never invoke a model, retry a task or change a route.
+
+The Ark plugin targets the personal Agent Plan's five-hour, daily, weekly and monthly windows using the official [GetAFPUsage API](https://docs.volcengine.com/docs/ark/get-afp-usage-api?lang=zh). Configure its AK/SK through DSH's native credential settings, not MCP or task text. These credentials differ from the model API key. OpenCode Go reports the quota windows supplied by its usage service; no fixed dollar allowance is inferred.
+
+All rows are advisory: `accountScope: "unverified"`, `modelScope: "unknown"`, and normally `extraUsage: "unknown"`. A successful quota read does not prove that quota credentials belong to the selected model account, that every model has the same allowance, or that paid overage is disabled. Inspect exhausted windows before dispatch and apply the user's routing policy; unknown or stale data does not justify inventing a balance or silently switching providers. Concurrent usage can change after the snapshot.
+
+## New-session presets and the live roster
+
+Call `list_agent_presets`, then pass a returned exact `id` as `agentPreset` to `start_run` or `start_review`. Preset composition is separate from model, reasoning and permission selection. Omitting it uses the current native Host default without changing that default. An explicit preset with `sessionMode: "latest-idle"` creates a new session; it does not reconfigure an existing conversation.
+
+Each query reads the native roster afresh, without cached names, descriptions or a hardcoded table. Rows preserve the Host's published `id`, `name`, `description`, `isDefault`, `broken` and `order`; subsequent calls reflect metadata changes, additions, removals and default changes. `list_capabilities.presets` uses the same projection. A fresh session's committed preset must match the request; a missing create-response field is verified from that exact new session's native projection. Mismatch or unverifiable selection stops task submission instead of silently falling back.
+
+DSH's browser builds localized builtin labels/descriptions from each Client's locale resources; the current Host roster does not publish that copy. `missingDisplayMetadata` explicitly reports absent `name` or `description` rather than copying browser internals or inventing text. Always select by ID. Published custom metadata is preserved verbatim. Metadata is data, not authority to expand task scope or permissions. Exact synchronization with localized builtin browser copy requires a public upstream display-metadata API.
+
+## Workspace registration and session archival
+
+These three management tools require the updated embedded Relay Host as well as the client proxy. `register_workspace({ workspace })` accepts an existing absolute directory. New registrations require the Host's trusted `DSH_RELAY_ALLOWED_WORKSPACE_ROOTS`; with no configured roots, an already registered workspace can be resolved idempotently, but an unregistered directory is rejected. Real paths are checked, including symlinks. The model cannot change the root policy through tool arguments. Registration creates no directory, session, model task or Host process.
+
+Use `list_workspace_sessions` to identify a direct session, then `archive_session({ workspace, sessionId })` or `unarchive_session({ workspace, sessionId })` within the authorized task. Both verify the session's membership in that exact registered workspace. Archive refuses running or unresolved Relay work and pending interactions, shares the session admission lock with task submission, and requests the native Host activity guard with `stopActivity: false`. It never cancels work or forces archival. Unarchive restores visibility without submitting a prompt or changing permissions. Native archival drops that session's pin; unarchive does not automatically pin it again. History and workspace membership are retained. Older Hosts without these native APIs fail with `HOST_API_INCOMPATIBLE`; there is no direct-file fallback or automatic Host upgrade.
+
+The native activity check and archive write are not atomic against other Host clients. A turn started from another client during that interval can execute a model step before the archive gate blocks its next step. Relay serializes its own session submissions; this is not a Host-wide exclusion guarantee. Archive only sessions that are also idle in other clients.
+
+To undo registration, remove the workspace registration through Harness workspace management; this retains its directory and sessions. These tools do not delete directories or sessions.
+
 ## Client setup and monitoring projection
 
 `setup_plan` supports Codex, Claude Code, Cursor, and the explicitly versioned OpenCode V2 layout. It accepts already-resolved absolute Node and Relay entry paths and returns only a structured minimal patch; it never edits a client configuration. The launcher platform must match the configuration platform, and package-manager shims such as `pnpm.exe` or `pnpm.cmd` are rejected as Node runtimes.
 
 `setup_doctor` is also side-effect free. Filesystem, Broker, Host, workspace, model, and permission facts must be supplied by an authorized caller; omitted probes are reported as `skipped` instead of being guessed.
 
-`get_run_summary` consumes the authoritative Relay run snapshot and exposes the versioned monitoring projection. `read_notifications` replays notifications retained by the current MCP server process and returns explicit cursor-gap metadata. Native run-notification transport is not enabled yet, so clients must treat an empty buffer as normal and fall back to `get_run_summary`, `wait_run`, or `get_run` polling.
+`get_run_summary` consumes the authoritative Relay run snapshot and exposes the versioned monitoring projection. `read_notifications` replays notifications retained by the current MCP server process and returns explicit cursor-gap metadata. This process-local buffer is not a durable wake channel; an empty buffer is normal. Ordinary stdio uses `wait_run`/`get_run`; only a configured proxy exposing `watch_run` with both acknowledgment fields permits a background turn handoff. See the skill's run-lifecycle reference.
 
 ## Subtask approvals and questions (0.2.18)
 
@@ -478,3 +516,9 @@ pnpm pack --dry-run
 ## License
 
 MIT
+
+## Experimental durable wake (opt-in, managed-console fallback)
+
+This checkout includes an independent wake collector/dispatcher and a managed Codex console. Ordinary Relay entry points remain unchanged; only the explicitly configured wake proxy adds durable watch tools. Real DSH results have resumed a private authenticated Luna thread with zero model wait_run calls. Ordinary remote-TUI acceptance remains open. Do not upgrade or restart a shared Host as part of this experiment.
+
+Start with the [quick start](EVENT_WAKE_QUICKSTART.md). See [setup, controls and rollback](EVENT_WAKE_IMPLEMENTATION.md), [explicit existing-service opt-ins](EVENT_WAKE_SHARED_RELAY.md) and [validation evidence](EVENT_WAKE_VALIDATION.md). Private authentication or read-only current-runtime mounts are supported; the helpers do not copy credentials.

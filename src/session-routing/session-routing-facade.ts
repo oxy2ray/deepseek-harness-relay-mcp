@@ -49,10 +49,29 @@ export class SessionRoutingFacade {
       workspaceId: workspace.workspaceId,
       ...(request.agentPreset === undefined ? {} : { agentPreset: request.agentPreset }),
     })
+    let committedPreset = created.agentPreset
+    if (request.agentPreset !== undefined) {
+      if (committedPreset !== undefined && committedPreset !== request.agentPreset) {
+        throw new Error('Host created the session with a different agentPreset than requested')
+      }
+      if (committedPreset === undefined) {
+        const matches = (await this.client.listSessions()).filter(session => session.sessionId === created.sessionId)
+        if (matches.length !== 1) throw new Error('created session agentPreset could not be verified in the selected workspace')
+        const session = matches[0]!
+        if (session.origin === 'subagent' || session.cwd === undefined || !samePath(session.cwd, workspace.path)) {
+          throw new Error('created session agentPreset could not be verified in the selected workspace')
+        }
+        if (session.agentPreset === undefined) throw new Error('created session agentPreset could not be verified')
+        if (session.agentPreset !== request.agentPreset) {
+          throw new Error('Host created the session with a different agentPreset than requested')
+        }
+        committedPreset = session.agentPreset
+      }
+    }
     return {
       sessionId: created.sessionId,
       reused: false,
-      agentPreset: created.agentPreset ?? request.agentPreset ?? null,
+      agentPreset: committedPreset ?? request.agentPreset ?? null,
     }
   }
 

@@ -1,6 +1,6 @@
 import type { ModelSelection, PermissionPreset, PromptPart } from '../types.js'
 import type { PermissionGateway } from '../permission-gateway/index.js'
-import { HostRpcError, inProcessTransportError, isTransientHostCode } from './host-errors.js'
+import { HostRpcError, hostApiIncompatible, inProcessTransportError, isMissingHostMethod, isTransientHostCode } from './host-errors.js'
 import type { InProcessDispatchHandler } from './in-process-dispatch-handler.js'
 import type {
   BeforeDispatch,
@@ -17,6 +17,7 @@ import type {
   SessionSummary,
   SettingsDescription,
   WorkspaceCatalog,
+  WorkspaceArchiveResult,
   WorkspaceView,
 } from './types.js'
 
@@ -53,6 +54,8 @@ export interface InProcessApiClientPort {
   workspace: {
     list: UnaryMethod<Record<string, never>, WorkspaceCatalog>
     create: UnaryMethod<{ path: string }, { workspace: WorkspaceView; created?: boolean }>
+    archiveSession?: UnaryMethod<{ sessionId: string; stopActivity: false }, WorkspaceArchiveResult>
+    unarchiveSession?: UnaryMethod<{ sessionId: string }, WorkspaceArchiveResult>
   }
   host: {
     describe: UnaryMethod<Record<string, never>, Record<string, unknown>>
@@ -110,6 +113,32 @@ export class InProcessHarnessGateway implements HarnessGatewayProvider {
 
   listWorkspaces(): Promise<WorkspaceCatalog> {
     return this.invoke('workspace.list', () => this.client.workspace.list({}))
+  }
+
+  async archiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    const archive = this.client.workspace.archiveSession
+    if (typeof archive !== 'function') throw hostApiIncompatible('workspace.archiveSession')
+    let result: WorkspaceArchiveResult
+    try {
+      result = await this.invoke('workspace.archiveSession', () => archive.call(this.client.workspace, { sessionId, stopActivity: false }))
+    } catch (error: unknown) {
+      if (isMissingHostMethod(error)) throw hostApiIncompatible('workspace.archiveSession')
+      throw error
+    }
+    return { archivedSessionIds: [...result.archivedSessionIds] }
+  }
+
+  async unarchiveSession(sessionId: string): Promise<WorkspaceArchiveResult> {
+    const unarchive = this.client.workspace.unarchiveSession
+    if (typeof unarchive !== 'function') throw hostApiIncompatible('workspace.unarchiveSession')
+    let result: WorkspaceArchiveResult
+    try {
+      result = await this.invoke('workspace.unarchiveSession', () => unarchive.call(this.client.workspace, { sessionId }))
+    } catch (error: unknown) {
+      if (isMissingHostMethod(error)) throw hostApiIncompatible('workspace.unarchiveSession')
+      throw error
+    }
+    return { archivedSessionIds: [...result.archivedSessionIds] }
   }
 
   async createWorkspace(path: string): Promise<WorkspaceView> {

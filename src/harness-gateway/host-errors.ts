@@ -12,6 +12,25 @@ export class HostRpcError extends Error {
   }
 }
 
+/** Explain that the connected Host predates a gateway operation. */
+export function hostApiIncompatible(operation: string): HostRpcError {
+  return new HostRpcError(
+    `${operation} is unavailable: the connected Harness Host does not support this API; update the Host and reconnect`,
+    true,
+    'HOST_API_INCOMPATIBLE',
+    false,
+  )
+}
+
+/** Recognize an explicitly missing method without hiding business rejections. */
+export function isMissingHostMethod(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null) return false
+  const code = stringProperty(error, 'code')
+  if (code !== undefined && /(?:METHOD|ENDPOINT)[_/-]?(?:NOT[_/-]?FOUND|UNKNOWN|UNSUPPORTED)|(?:UNKNOWN|UNSUPPORTED)[_/-]?(?:METHOD|ENDPOINT)/iu.test(code)) return true
+  const message = stringProperty(error, 'message')
+  return message !== undefined && /(?:method|endpoint).{0,80}(?:not found|unknown|unavailable|unsupported|not registered|not mounted)|(?:not found|unknown|unavailable|unsupported).{0,80}(?:method|endpoint)/iu.test(message)
+}
+
 /**
  * Classify a Harness business error without leaking transport details.
  * @param code - Harness error code.

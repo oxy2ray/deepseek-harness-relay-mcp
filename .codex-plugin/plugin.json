@@ -16,7 +16,7 @@
   "interface": {
     "displayName": "Harness Relay MCP",
     "shortDescription": "Delegate and monitor DeepSeek Harness tasks.",
-    "longDescription": "Delegate long-running work to DeepSeek Harness from any MCP agent and monitor native sessions and durable events to completion.",
+    "longDescription": "Delegate scoped work through live Harness models and presets, inspect provider quotas before dispatch, and verify native results. Manage authorized workspaces and idle sessions; use durable wake only when the configured proxy acknowledges it.",
     "developerName": "TonyTangLab",
     "category": "Productivity",
     "capabilities": [
@@ -25,9 +25,11 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Named reviews: pass exact provider/model and authorizationBasis only through the plugin's native MCP tools; do not reconfirm.",
-      "Monitor Harness to completion using native MCP. Never create temporary Node, PowerShell, Python, or shell clients.",
-      "If native tools are unavailable, repair installation and reload the updated plugin in a new Codex task."
+      "Discover live models, reasoning, presets and provider quotas before dispatch; select exact provider/model IDs under the user's routing policy. Unknown quota is not zero.",
+      "Use $delegate-to-deepseek-harness and native MCP tools with workspace/file references and least privilege. Preserve existing user authorization; never embed source or create a shell RPC client.",
+      "Use native workspace registration, idle-session archive/unarchive and new-session preset selection only within the authorized task; metadata does not grant permissions.",
+      "Consume and verify terminal results. End a turn awaiting events only when this proxy exposes watch_run and its structured response confirms acknowledged=true and hostMayConcludeTurn=true; otherwise continue native wait_run.",
+      "If the tool catalog is incomplete, diagnose with doctor and reload the installed plugin in a new Codex task. Installing the plugin does not activate managed wake."
     ]
   }
 }
