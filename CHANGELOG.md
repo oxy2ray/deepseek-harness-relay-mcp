@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.2.22
+
+- Automatically enroll new Codex conversations from host thread metadata inside authorized workspace roots; preserve static mode, pause/expiry and existing routing permissions.
+- Default Codex `wait_run` responses to brief status, retain explicit `detail=full`, and retrieve complete terminal results with `get_run`.
+- Replace legacy wait-only tool hints with acknowledged watch-first monitoring; routing hints never grant a background handoff by themselves.
+
 ## 0.2.21
 
 - Retire resolved approval requests and use each thread's live approval flags instead of a global request count; passive wake connections never approve requests.

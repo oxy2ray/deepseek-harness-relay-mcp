@@ -1,6 +1,6 @@
 {
   "name": "deepseek-harness-relay",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "description": "Delegate and monitor DeepSeek Harness work from any MCP agent.",
   "author": {
     "name": "TonyTangLab"
@@ -29,7 +29,7 @@
       "Use $delegate-to-deepseek-harness and native MCP tools with workspace/file references and least privilege. Preserve existing user authorization; never embed source or create a shell RPC client.",
       "Use native workspace registration, idle-session archive/unarchive and new-session preset selection only within the authorized task; metadata does not grant permissions.",
       "For active dispatched runs, prefer native watch_run when offered. Once every background run confirms acknowledged=true and hostMayConcludeTurn=true, end the turn awaiting events without wait_run. Use native wait_run only when wake is absent or unacknowledged; on wake consume get_run and verify the full result.",
-      "Existing Codex daemon threads support opt-in wake through an operator-configured binding and an independent worker; per-request host metadata selects the binding. Installation alone is not readiness. Verify doctor and every watch acknowledgement; preserve native wait fallback when unavailable."
+      "When automatic enrollment is configured, the proxy records new Codex thread mappings from host metadata inside authorized workspace roots; users do not bind each conversation manually. watch_run must still confirm acknowledged=true and hostMayConcludeTurn=true. wait_run defaults to brief status; get_run retrieves complete results. Notifications to one existing Codex thread wait while that thread is generating; later completions remain queued until it is idle."
     ]
   }
 }

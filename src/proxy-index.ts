@@ -6,8 +6,10 @@ import { fileURLToPath } from 'node:url'
 import { existingWakeConfigPath, readExistingWakeConfig } from './wake/existing-config.js'
 import { WakeOutbox } from './wake/outbox.js'
 import { WakeStore } from './wake/store.js'
+import { ensureAutoBinding } from './wake/auto-binding.js'
+import type { StdioProxyConfig } from './stdio-proxy/types.js'
 
-let wake: { outbox: WakeOutbox } | undefined
+let wake: StdioProxyConfig['wakeByThread']
 let wakePrincipal: string | undefined
 try {
   const path = existingWakeConfigPath()
@@ -25,6 +27,10 @@ try {
       worker.unref()
     }
     wake = { outbox }
+    const policy = config.autoBind
+    if (policy) wake.ensureBinding = (threadId, run) => ensureAutoBinding({
+      outbox, socket: config.socket, principal: config.principal, policy, threadId, run,
+    })
     wakePrincipal = config.principal
   }
 } catch { process.stderr.write('Existing-thread wake configuration unavailable; ordinary Relay remains available.\n') }

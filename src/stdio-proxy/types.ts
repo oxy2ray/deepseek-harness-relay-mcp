@@ -2,12 +2,16 @@ import type { RelayEndpointDescriptor } from '../authority/index.js'
 import type { RelayStatusDocument } from '../relay-runtime/index.js'
 import type { ProcessProbe } from '../state-repository/index.js'
 import type { WakeOutbox, WakeToolContext } from '../wake/index.js'
+import type { WakeBinding, WakeRunSnapshot } from '../wake/schema.js'
 
 export type { RelayEndpointDescriptor }
 
 export interface StdioProxyConfig {
   wake?: WakeToolContext
-  wakeByThread?: { outbox: WakeOutbox }
+  wakeByThread?: {
+    outbox: WakeOutbox
+    ensureBinding?: (threadId: string, run: WakeRunSnapshot) => Promise<WakeBinding>
+  }
   descriptorFile: string
   statusFile?: string
   clientPrincipalId: string

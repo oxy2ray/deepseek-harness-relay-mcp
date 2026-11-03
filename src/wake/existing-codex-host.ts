@@ -37,6 +37,13 @@ const turnStartShape = z.object({ turn: z.object({ id: z.string() }).passthrough
 const queueAddShape = z.object({ queuedSubmission: z.object({ id: z.string(), clientUserMessageId: z.string() }).passthrough() }).passthrough()
 const queueDeleteShape = z.object({ deleted: z.boolean() }).passthrough()
 
+/** Stable daemon identity for the already running Codex host: normalized socket, codexHome and uid. */
+export function codexServerIdentity(input: { socket: string; codexHome: string; uid: number | string }): string {
+  return createHash('sha256')
+    .update(JSON.stringify([resolve(input.socket), resolve(input.codexHome), String(input.uid)]))
+    .digest('hex')
+}
+
 /** A locally admitted turn stays answerable as `pending` only for this bounded window. */
 const LOCAL_ACCEPTANCE_TTL_MS = 120_000
 const MAX_LOCAL_ACCEPTANCES = 256
@@ -63,15 +70,14 @@ export class ExistingCodexHost implements WakeHost {
   private readonly locallyAccepted = new Map<string, { turnId: string; recordedAt: number }>()
   private readonly completionNotices = new Map<string, 'completed' | 'failed' | 'interrupted'>()
   private startTail: Promise<unknown> = Promise.resolve()
-  private readonly capability: WakeHostCapabilities
+  private capability: WakeHostCapabilities
   private constructor(
     private readonly client: ExistingCodexClient,
     readonly serverIdentity: string,
-    capabilityReady: boolean,
   ) {
     this.capability = {
-      serverIdentity, authenticated: capabilityReady, sameThreadResume: capabilityReady,
-      durableHistory: capabilityReady, completionEvidence: capabilityReady, exclusiveIdleAdmission: capabilityReady,
+      serverIdentity, authenticated: false, sameThreadResume: false,
+      durableHistory: false, completionEvidence: false, exclusiveIdleAdmission: false,
     }
     client.onDisconnected?.(() => { this.disconnected = true })
     client.onNotification?.(notification => {
@@ -91,28 +97,46 @@ export class ExistingCodexHost implements WakeHost {
   private disconnected = false
 
   static async attach(options: ExistingCodexHostOptions): Promise<ExistingCodexHost> {
-    const socket = resolve(options.socket)
-    const codexHome = resolve(options.codexHome)
-    const identity = createHash('sha256').update(JSON.stringify([socket, codexHome, String(options.uid)])).digest('hex')
+    const identity = codexServerIdentity(options)
     await options.client.initialize()
     if (options.client.disconnected) throw new Error('existing Codex daemon client is disconnected')
-
-    const bound = new Map<string, string>()
-    for (const binding of options.bindings) {
-      const workspace = resolve(binding.workspace)
-      const resumed = threadShape.parse(await options.client.request('thread/resume', { threadId: binding.threadId, excludeTurns: true }))
-      if (resumed.thread.id !== binding.threadId || resolve(resumed.thread.cwd) !== workspace) throw new Error('existing Codex thread identity/workspace mismatch')
-      const read = threadShape.parse(await options.client.request('thread/read', { threadId: binding.threadId }))
-      if (read.thread.id !== binding.threadId || resolve(read.thread.cwd) !== workspace) throw new Error('existing Codex thread identity/workspace mismatch')
-      // These reads establish durable-history and exact-thread queue support before capabilities are advertised.
-      pageShape.parse(await options.client.request('thread/turns/list', { threadId: binding.threadId, limit: 1 }))
-      pageShape.parse(await options.client.request('thread/items/list', { threadId: binding.threadId, limit: 1 }))
-      queuePageShape.parse(await options.client.request('thread/queue/list', { threadId: binding.threadId, limit: 1 }))
-      bound.set(binding.threadId, workspace)
-    }
-    const attached = new ExistingCodexHost(options.client, identity, bound.size > 0 && !options.client.disconnected)
-    for (const [threadId, workspace] of bound) attached.bound.set(threadId, workspace)
+    const attached = new ExistingCodexHost(options.client, identity)
+    // Initial configuration and later dynamic attachments share one exact-thread
+    // attach path, so a host started with zero configured threads behaves identically.
+    await attached.attachBindings(options.bindings)
     return attached
+  }
+
+  /**
+   * Attaches additional exact already materialized threads to this live daemon
+   * connection. Each new thread is only resumed (no thread settings are read or
+   * written) and an already attached thread keeps its recorded workspace. The
+   * first successful dynamic attach on a zero-binding host makes it capable.
+   */
+  async attachBindings(bindings: ExistingCodexBinding[]): Promise<void> {
+    try {
+      for (const binding of bindings) {
+        if (this.disconnected || this.client.disconnected) throw new Error('existing Codex daemon client is disconnected')
+        if (typeof binding.threadId !== 'string' || binding.threadId.length === 0) throw new Error('explicit existing thread id required')
+        const workspace = resolve(binding.workspace)
+        const current = this.bound.get(binding.threadId)
+        if (current !== undefined) {
+          // Preserve the existing attachment; never retarget a thread's workspace.
+          if (current !== workspace) throw new Error('existing Codex thread identity/workspace mismatch')
+          continue
+        }
+        const resumed = threadShape.parse(await this.client.request('thread/resume', { threadId: binding.threadId, excludeTurns: true }))
+        // ONLY this thread is resumed: identity and workspace must match the binding
+        // before it can carry wake traffic.
+        if (resumed.thread.id !== binding.threadId || resolve(resumed.thread.cwd) !== workspace) throw new Error('existing Codex thread identity/workspace mismatch')
+        // Preserve the original protocol gate for each dynamically attached thread.
+        // Resume alone does not establish durable history or native queue support.
+        pageShape.parse(await this.client.request('thread/turns/list', { threadId: binding.threadId, limit: 1 }))
+        pageShape.parse(await this.client.request('thread/items/list', { threadId: binding.threadId, limit: 1 }))
+        queuePageShape.parse(await this.client.request('thread/queue/list', { threadId: binding.threadId, limit: 1 }))
+        this.bound.set(binding.threadId, workspace)
+      }
+    } finally { this.refreshCapability() }
   }
 
   async capabilities(): Promise<WakeHostCapabilities> {
@@ -120,6 +144,15 @@ export class ExistingCodexHost implements WakeHost {
     return { ...this.capability, authenticated: live && this.capability.authenticated,
       sameThreadResume: live && this.capability.sameThreadResume, durableHistory: live && this.capability.durableHistory,
       completionEvidence: live && this.capability.completionEvidence, exclusiveIdleAdmission: live && this.capability.exclusiveIdleAdmission }
+  }
+
+  /** Capability follows the live connection and whether any exact thread is attached. */
+  private refreshCapability(): void {
+    const ready = !this.disconnected && !this.client.disconnected && this.bound.size > 0
+    this.capability = {
+      serverIdentity: this.serverIdentity, authenticated: ready, sameThreadResume: ready,
+      durableHistory: ready, completionEvidence: ready, exclusiveIdleAdmission: ready,
+    }
   }
 
   async inspect(binding: WakeBinding) {

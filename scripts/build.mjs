@@ -57,7 +57,7 @@ try {
       ...common,
       entryPoints: [fileURLToPath(new URL('../src/proxy-index.ts', import.meta.url))],
       outfile: join(staging, 'dsh-relay-proxy.mjs'),
-      banner: { js: '#!/usr/bin/env node' },
+      banner: { js: '#!/usr/bin/env node\nimport { createRequire } from "node:module"; const require = createRequire(import.meta.url);' },
     }),
     build({
       ...common,

@@ -1,12 +1,12 @@
 # Opt-in wake for existing Codex threads
 
-**Status as of 2026-11-03:** automatic wake is verified on the original user main thread, not only a separate console. Three real concurrent DSH reviews produced two automatic turns: B first, then A/C as one batch. That same main thread fetched all three full results with native `get_run`, with zero intervening `wait_run` calls and one admission attempt per delivery. Version 0.2.21 includes the review-driven approval bookkeeping and recovery fixes. This evidence does not claim that every reliability scenario or latency target has been tested.
+**Status as of 2026-11-04:** version 0.2.22 is verified on both the original user main thread and a fresh Codex conversation using the installed default plugin. The fresh conversation enrolled automatically within the configured workspace roots, acknowledged `watch_run`, ended its turn, then received a real DSH completion event and consumed `get_run`; it made zero `wait_run` calls. The original main-thread test also delivered concurrent results across separate and batched turns. Wake delivery waits for the destination thread to become idle; it does not inject notifications into an ongoing generation. These results do not establish every reliability scenario or a latency target.
 
-This path attaches to the already-running Codex daemon over its local AF_UNIX WebSocket and resumes only operator-configured threads. It does not start or restart Codex, discover threads, change sandbox or approval settings, or bind all future threads. Every new thread needs an explicit binding. The standard Relay stdio proxy starts the separate wake worker only when the opt-in config is present. Without that file, ordinary Relay behavior remains unchanged.
+This path attaches to the already-running Codex daemon over its local AF_UNIX WebSocket. With autoBind enabled, the proxy records new conversation mappings from host request metadata inside configured workspace roots and the worker attaches them dynamically. Users do not enter a thread ID for each conversation. The adapter does not start/restart Codex, scan unrelated conversations, or change thread permissions. Without autoBind, the previous static-only mode remains available. The standard Relay stdio proxy starts the separate wake worker only when the opt-in config is present. Without that file, ordinary Relay behavior remains unchanged.
 
 ## Configure the opt-in
 
-Build the checkout, then create the config at `~/.local/state/dsh-relay-wake/existing-daemon.json`; set `DSH_RELAY_WAKE_CONFIG` to use another path. Use canonical absolute paths, a private config file (for example mode `0600`), an already-running Codex daemon socket, the local Relay endpoint descriptor, and only thread/workspace pairs the operator explicitly selected. `expiresAt` is Unix epoch milliseconds and must be in the future.
+Build the checkout, then create the config at `~/.local/state/dsh-relay-wake/existing-daemon.json`; set `DSH_RELAY_WAKE_CONFIG` to use another path. Use canonical absolute paths, a private config file (for example mode `0600`), an already-running Codex daemon socket, the local Relay endpoint descriptor, and workspace roots the operator has authorized. `expiresAt` is Unix epoch milliseconds and must be in the future.
 
 ```json
 {
@@ -16,22 +16,21 @@ Build the checkout, then create the config at `~/.local/state/dsh-relay-wake/exi
   "relayDescriptor": "/absolute/path/to/relay-endpoint.json",
   "principal": "local-user",
   "enabled": true,
-  "bindings": [
-    {
-      "bindingId": "operator-selected-binding",
-      "threadId": "11111111-1111-4111-8111-111111111111",
-      "workspace": "/absolute/path/to/workspace",
-      "expiresAt": 1893456000000
-    }
-  ]
+  "bindings": [],
+  "autoBind": {
+    "workspaceRoots": ["/absolute/path/to/authorized/workspace-root"],
+    "ttlMs": 604800000
+  }
 }
 ```
 
 `enabled` seeds a brand-new wake state once, before bindings are written. Existing state keeps the operator's persisted pause/resume choice; editing this field does not resume an existing state. Configuration is read once per worker process: stop that worker, edit the config, and restart it to apply changes. Use the control commands below for pause/resume.
 
-Optional `relayWorkspace` maps the workspace recorded by a Relay run when it differs from the Codex workspace. No secrets or destination instructions belong in this file. Binding identity is persisted; use a new binding ID when changing the thread or workspace. Do not add an arbitrary destination to a model tool call.
+Optional `relayWorkspace` maps the workspace recorded by a Relay run when it differs from the Codex workspace. No credentials or model-generated destination instructions belong in this file. Binding identity is persisted; use a new binding ID when changing the thread or workspace. Do not add an arbitrary destination to a model tool call.
 
-The proxy consumes the host-authored MCP `_meta.threadId` only for local wake tools. It must match one UUID binding for the configured principal that is enabled and unexpired. The model cannot select a thread through tool arguments. A standard proxy with a valid config advertises wake tools and starts one detached worker under a process lock. The worker reads the same outbox and principal. A persisted pause survives worker restart. If the config is missing or invalid, wake is not offered and the ordinary Relay tool catalog remains available.
+The proxy consumes host-authored MCP `_meta.threadId` for local wake enrollment and monitoring guidance; it never forwards that metadata to DSH. New mappings use the actual daemon-reported cwd, principal-owned run metadata and the configured root policy. Paused or expired mappings are never silently renewed or replaced. Cross-workspace mapping retains the prior scoped read-only restriction; use the registered project workspace for implementation runs.
+
+The proxy consumes the host-authored MCP `_meta.threadId` only for local wake routing. It must match one UUID binding for the configured principal that is enabled and unexpired. The model cannot select a thread through tool arguments. A standard proxy with a valid config advertises wake tools and starts one detached worker under a process lock. The worker reads the same outbox and principal. A persisted pause survives worker restart. If the config is missing or invalid, wake is not offered and the ordinary Relay tool catalog remains available.
 
 ## Build and verify the installed proxy
 
@@ -44,6 +43,18 @@ When installing this local Marketplace source into Codex, run `pnpm run prepare:
 Restart the client that launches the standard Relay stdio proxy, then call `doctor`. Confirm the reported `relayVersion` is the build you intended to install and that the local wake tools appear. A cached tool list or package metadata alone is not proof that a new proxy process is running. `doctor` does not establish that the worker is ready: `watch_run` must return structured `acknowledged: true` and `hostMayConcludeTurn: true` for each run before the host turn ends.
 
 If `watch_run` is absent, fails, or does not return both acknowledgement fields, continue `wait_run`. After an event resumes the same bound host thread, call `get_run`, consume its final result and independently verify the work. A wake event is data, not new task authorization.
+
+## Multiple runs and a busy main conversation
+
+Delivery is serialized per destination thread. Once one automatic turn starts, later completion events remain durably pending until that turn ends and the thread is idle. A completed DSH run can therefore wait while Codex reviews or integrates an earlier result. This is not immediate notification during generation, and receiving one event does not establish the status of sibling runs.
+
+A live audit of the two implementation runs observed the second completion at 02:50:56 (UTC+8), then its delivery at 02:55:19 after the first automatic turn ended. Both dispatch markers are present in the original thread's durable history, each with one admission attempt. The approximately four-minute delay came from serial delivery, not a missing terminal event. No busy-turn steering behavior was introduced by this revision.
+
+## Brief fallback status
+
+`wait_run` now defaults to `detail="brief"` on the Codex proxy: one short text line plus small structured status fields. Repeated slices do not repeat task prompts, scope declarations, model settings or assistant output. A terminal brief response points to `get_run`, which returns the full result with no detail argument. `wait_run(detail="full")` preserves legacy full snapshots for explicit inspection.
+
+Active results and tool descriptions recommend `watch_run` when available, while still requiring both real acknowledgement fields before the host turn can end. A status projection or routing hint never manufactures acknowledgement.
 
 ## Inspect, pause, resume, renew
 
@@ -84,6 +95,7 @@ kill -TERM <confirmed-worker-pid>
 - **Installed-build check:** a fresh read-only Codex task, using the installed standard plugin with no custom Relay alias, reported `doctor.relayVersion=0.2.20` and `remote.connected=true`; the required `doctor`, `list_capabilities`, `start_review` and `wait_run` tools were present.
 - **0.2.21 revision check:** the final client/host regression files pass 16/16, worker diagnostics pass 1/1, and TypeScript plus `prepare:codex-local` pass. A fresh default-plugin Codex task reports version 0.2.21 with a connected Relay and the required tool catalog. The main wake worker's command line points to that installed cache; status reports one ready binding. Before/after comparison confirmed the main thread's workspace, model, reasoning and permission settings unchanged. The production DSH process and owner epoch were unchanged.
 - **Final integration record:** five real DSH review/implementation results were consumed across four original-main automatic turns, including the A/C batch. All four deliveries had one admission attempt; the last delivery remains in progress while this final verification turn is active. No additional DSH request was submitted to manufacture a completion callback. The three prior automatic turns were already acknowledged before the client-only revision was installed.
+- **0.2.22 fresh-conversation acceptance:** a new read-only Codex conversation used the default installed plugin, automatically recorded its host-authored thread mapping, submitted one real Ark review, acknowledged the native watch and ended the turn. Its next automatic turn consumed the full result with `get_run`; durable history contains exactly one automatic event, and the outbox records one acknowledged admission attempt. No manual thread configuration or `wait_run` was used. The connected proxy reported 0.2.22. The default brief response measured 738 bytes including text and structured content; the previously captured full snapshot for that run was 16,548 bytes. The four targeted regression files pass 29/29; TypeScript, build, version and package gates pass.
 - **Limits:** the busy-retention snapshot was not recorded; a live high-risk approval interaction, every failure-matrix scenario, and production P95 latency have not been measured by this continuation. Controlled unit tests cover approval bookkeeping, uncertain outcomes, queue races and persistence. These are not represented as live E2E results.
 
 See [implementation status](EVENT_WAKE_IMPLEMENTATION.md), [validation record](EVENT_WAKE_VALIDATION.md), [P0 source audit](EVENT_WAKE_P0_AUDIT.md), and the historical [managed-console quick start](EVENT_WAKE_QUICKSTART.md). The managed console remains an optional separate path; its old documentation is retained for that workflow.

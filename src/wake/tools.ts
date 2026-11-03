@@ -5,7 +5,7 @@ import { WakeOutbox } from './outbox.js'
 
 export interface WakeToolContext { outbox: WakeOutbox; bindingId: string }
 const identifier = z.string().min(1).max(160).regex(/^[a-zA-Z0-9_.:-]+$/)
-const watchInput = z.object({ runId: identifier, idempotencyKey: identifier,
+export const watchInput = z.object({ runId: identifier, idempotencyKey: identifier,
   events: z.array(z.enum(['terminal', 'needs_attention'])).min(1).max(2).optional() }).strict()
 
 export const wakeTools: Tool[] = [

@@ -2,13 +2,16 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
-import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { CallToolRequestSchema, ErrorCode, ListToolsRequestSchema, type CallToolResult } from '@modelcontextprotocol/sdk/types.js'
 import { createProductToolCatalog } from '../mcp-server/index.js'
 import { HarnessHostAutostartFacade } from './host-autostart-facade.js'
 import { ProxyDiagnosticsFacade, type ProxyInspection } from './proxy-diagnostics-facade.js'
 import type { ProxyDoctorReport, ProxyRouteFailure, StdioProxyConfig, StdioProxyDependencies } from './types.js'
 import { callWakeTool, wakeTools, WakeCursorExpiredError } from '../wake/index.js'
 import type { RunSnapshot } from '../types.js'
+import { watchInput } from '../wake/tools.js'
+import type { WakeRunSnapshot } from '../wake/schema.js'
+import { decorateMonitoringTool, projectWaitResult, withWakeHint } from './monitoring-presentation.js'
 
 const principalPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
@@ -34,7 +37,7 @@ export class StdioProxyFacade {
     { name: 'dsh-relay-proxy', version: relayVersion },
     {
       capabilities: { tools: { listChanged: true } },
-      instructions: 'Local-first stdio proxy to the embedded Harness Relay authority. Use doctor to verify connectivity even if cached tool schemas are listed. Discover live models, presets and providerQuotas before dispatch. When wake tools are offered, they are bound to the configured host thread. Only when watch_run returns structured acknowledged=true plus hostMayConcludeTurn=true may this host turn end awaiting events. This is not task completion: retrieve get_run on wake and verify assistantText. Otherwise continue native wait_run to terminal. Never use a shell RPC client.',
+      instructions: 'Local-first stdio proxy to the embedded Harness Relay authority. Use doctor to verify connectivity even if cached tool schemas are listed. Discover live models, presets and providerQuotas before dispatch. Prefer watch_run for active runs when offered. Automatic enrollment, when configured, uses host thread metadata and authorized workspace roots; callers never supply a destination. Only when watch_run returns structured acknowledged=true plus hostMayConcludeTurn=true may this host turn end awaiting events. wait_run defaults to a brief status projection; fetch complete terminal results with get_run. This is not task completion: retrieve get_run on wake and verify assistantText. Otherwise continue native wait_run to terminal. Never use a shell RPC client.',
     },
   )
   private readonly diagnostics: ProxyDiagnosticsFacade
@@ -89,8 +92,8 @@ export class StdioProxyFacade {
       this.lastError = null
       return {
         tools: cursor === undefined
-          ? [doctorTool, ...page.tools.filter(tool => tool.name !== doctorTool.name && (!this.hasWakeTools() || !wakeTools.some(w => w.name === tool.name))), ...(this.hasWakeTools() ? wakeTools : [])]
-          : page.tools.filter(tool => tool.name !== doctorTool.name),
+          ? [doctorTool, ...page.tools.filter(tool => tool.name !== doctorTool.name && (!this.hasWakeTools() || !wakeTools.some(w => w.name === tool.name))).map(decorateMonitoringTool), ...(this.hasWakeTools() ? wakeTools : [])]
+          : page.tools.filter(tool => tool.name !== doctorTool.name).map(decorateMonitoringTool),
         ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
       }
     } catch (error) {
@@ -102,8 +105,18 @@ export class StdioProxyFacade {
   private async callTool(name: string, args: Record<string, unknown> | undefined, meta?: unknown): Promise<object> {
     if (this.hasWakeTools() && wakeTools.some(tool => tool.name === name)) {
       try {
-        const context = await this.resolveWakeContext(meta)
+        let ownedRun: RunSnapshot | undefined
+        if (name === 'watch_run') {
+          const input = watchInput.parse(args ?? {})
+          const result = await this.callTool('get_run', { runId: input.runId }) as CallToolResult
+          const snapshot = result.structuredContent as unknown as RunSnapshot | undefined
+          if (result.isError || snapshot?.runId !== input.runId) throw new Error('owned run unavailable')
+          ownedRun = snapshot
+        }
+        const context = await this.resolveWakeContext(meta, ownedRun)
+        if (name === 'watch_run') await this.awaitWorkerBinding(context)
         const result = await callWakeTool(context, this.config.clientPrincipalId, name, args ?? {}, async runId => {
+          if (ownedRun?.runId === runId) return ownedRun
           const remote = await this.callTool('get_run', { runId }) as { isError?: boolean; structuredContent?: RunSnapshot }
           if (remote.isError || !remote.structuredContent) throw new Error('owned run unavailable')
           return remote.structuredContent
@@ -127,11 +140,22 @@ export class StdioProxyFacade {
     const remote = this.remote
     if (remote === null) return this.unavailableResult(name, this.requireFailure())
     try {
-      return await remote.callTool(
-        { name, ...(args === undefined ? {} : { arguments: args }) },
+      const detail = args?.detail ?? 'brief'
+      if (name === 'wait_run' && detail !== 'brief' && detail !== 'full') {
+        return { isError: true, content: [{ type: 'text', text: 'wait_run detail must be brief or full.' }] }
+      }
+      const forwarded = name === 'wait_run' && args ? Object.fromEntries(Object.entries(args).filter(([key]) => key !== 'detail')) : args
+      const result = await remote.callTool(
+        { name, ...(forwarded === undefined ? {} : { arguments: forwarded }) },
         undefined,
         { timeout: this.config.requestTimeoutMs },
-      )
+      ) as CallToolResult
+      const monitored = ['start_run', 'start_review', 'get_run', 'wait_run'].includes(name)
+      const wakeAvailable = monitored && !result.isError
+        ? await this.prepareWakeHint(meta, result.structuredContent as unknown as WakeRunSnapshot | undefined)
+        : false
+      if (name === 'wait_run') return projectWaitResult(result, { detail: detail as 'brief' | 'full', wakeAvailable })
+      return wakeAvailable ? withWakeHint(result) : result
     } catch (error) {
       if (isRequestTimeout(error)) return this.requestTimeoutResult(name, this.config.requestTimeoutMs)
       const routeFailure = this.diagnostics.remoteFailure(error)
@@ -144,7 +168,7 @@ export class StdioProxyFacade {
     return this.config.wake !== undefined || this.config.wakeByThread !== undefined
   }
 
-  private async resolveWakeContext(meta: unknown) {
+  private async resolveWakeContext(meta: unknown, run?: WakeRunSnapshot) {
     if (this.config.wake !== undefined) return this.config.wake
     const outbox = this.config.wakeByThread?.outbox
     if (!outbox) throw new Error('wake is not configured')
@@ -152,11 +176,38 @@ export class StdioProxyFacade {
       ? (meta as Record<string, unknown>).threadId
       : undefined
     if (typeof threadId !== 'string' || !uuidPattern.test(threadId)) throw new Error('host thread binding metadata required')
-    const state = await outbox.store.read()
+    let state = await outbox.store.read()
+    if (!state.bindings.some(binding => binding.threadId === threadId && binding.principal === this.config.clientPrincipalId)
+      && run && this.config.wakeByThread?.ensureBinding) {
+      await this.config.wakeByThread.ensureBinding(threadId, run)
+      state = await outbox.store.read()
+    }
     const matches = state.bindings.filter(binding => binding.threadId === threadId
       && binding.principal === this.config.clientPrincipalId && binding.enabled && binding.expiresAt > outbox.now())
     if (matches.length !== 1) throw new Error('host thread has no unique enabled wake binding')
     return { outbox, bindingId: matches[0]!.bindingId }
+  }
+
+  private async prepareWakeHint(meta: unknown, run?: WakeRunSnapshot): Promise<boolean> {
+    if (!this.hasWakeTools() || !run?.runId || !run.workspace) return false
+    try {
+      const context = await this.resolveWakeContext(meta, run)
+      return (await context.outbox.store.read()).enabled
+    } catch { return false }
+  }
+
+  /** First registration waits locally for the real worker, never for model completion. */
+  private async awaitWorkerBinding(context: import('../wake/tools.js').WakeToolContext): Promise<void> {
+    const deadline = Date.now() + 5000
+    do {
+      const state = await context.outbox.store.read()
+      const now = context.outbox.now()
+      const binding = state.bindings.find(row => row.bindingId === context.bindingId)
+      if (!state.enabled || !binding?.enabled || binding.expiresAt <= now) return
+      if (state.worker?.ready && state.worker.bindingIds.includes(context.bindingId)
+        && state.worker.heartbeatAt <= now && now - state.worker.heartbeatAt <= 3000) return
+      await new Promise(resolve => setTimeout(resolve, 100))
+    } while (Date.now() < deadline)
   }
 
   private ensureRemote(): Promise<boolean> {
@@ -239,7 +290,7 @@ export class StdioProxyFacade {
 
   private async localToolCatalog(): Promise<RemoteTools> {
     const productTools = await this.productTools
-    return [doctorTool, ...productTools.filter(tool => tool.name !== doctorTool.name)]
+    return [doctorTool, ...productTools.filter(tool => tool.name !== doctorTool.name).map(decorateMonitoringTool)]
   }
 
   private async supportsStructuredError(toolName: string): Promise<boolean> {
