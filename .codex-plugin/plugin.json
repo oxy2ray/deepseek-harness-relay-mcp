@@ -28,7 +28,7 @@
       "Discover live models, reasoning, presets and provider quotas before dispatch; select exact provider/model IDs under the user's routing policy. Unknown quota is not zero.",
       "Use $delegate-to-deepseek-harness and native MCP tools with workspace/file references and least privilege. Preserve existing user authorization; never embed source or create a shell RPC client.",
       "Use native workspace registration, idle-session archive/unarchive and new-session preset selection only within the authorized task; metadata does not grant permissions.",
-      "Consume and verify terminal results. End a turn awaiting events only when this proxy exposes watch_run and its structured response confirms acknowledged=true and hostMayConcludeTurn=true; otherwise continue native wait_run.",
+      "For active dispatched runs, prefer native watch_run when offered. Once every background run confirms acknowledged=true and hostMayConcludeTurn=true, end the turn awaiting events without wait_run. Use native wait_run only when wake is absent or unacknowledged; on wake consume get_run and verify the full result.",
       "Existing Codex daemon threads support opt-in wake through an operator-configured binding and an independent worker; per-request host metadata selects the binding. Installation alone is not readiness. Verify doctor and every watch acknowledgement; preserve native wait fallback when unavailable."
     ]
   }
