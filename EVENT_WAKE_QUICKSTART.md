@@ -1,5 +1,7 @@
 # Event wake managed-console quick start
 
+> **Workflow note — 2026-11-03:** This is the historical, separate managed-console quick start. For the new opt-in that attaches to operator-selected threads in an already-running Codex daemon, use [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md). The existing-thread path is not auto-bound to every thread, and the original user root/main thread is not yet validated. No config means the ordinary Relay proxy remains unchanged.
+
 The wake consumer currently runs as an opt-in managed-console fallback. It owns a private Codex app-server process and thread; it is not a general plugin integration for an existing Codex TUI session.
 
 ## Prepare a private config
@@ -46,7 +48,7 @@ node dist/dsh-relay-wake-console.mjs /absolute/path/to/console-config.json
 Commands:
 
 - `/status` shows the persisted queue and delivery counts.
-- `/pause` keeps collecting events and stops automatic Codex delivery.
+- `/pause` keeps collecting events and stops new automatic Codex admission; it cannot cancel a turn already accepted and running.
 - `/resume` allows queued events to be delivered to the bound thread.
 - `/watch RUN_ID KEY` watches an existing Relay run with an idempotency key.
 - `/recover DISPATCH_ID` asks the host to reconcile one held dispatch.

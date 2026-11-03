@@ -9,10 +9,10 @@ const watchInput = z.object({ runId: identifier, idempotencyKey: identifier,
   events: z.array(z.enum(['terminal', 'needs_attention'])).min(1).max(2).optional() }).strict()
 
 export const wakeTools: Tool[] = [
-  { name: 'watch_run', description: 'Opt-in durable watch for this console’s preconfigured binding. Only acknowledged=true and hostMayConcludeTurn=true permit ending this host turn. If unavailable, continue wait_run. No destination or permission can be changed.',
+  { name: 'watch_run', description: 'Opt-in durable watch for the configured host thread. Only acknowledged=true and hostMayConcludeTurn=true permit ending this host turn. If unavailable, continue wait_run. No destination or permission can be changed.',
     inputSchema: { type: 'object', properties: { runId: { type: 'string' }, idempotencyKey: { type: 'string' }, events: { type: 'array', items: { enum: ['terminal', 'needs_attention'] } } }, required: ['runId', 'idempotencyKey'], additionalProperties: false } },
   { name: 'unwatch_run', description: 'Stop observing an owned subscription; preserve durable events.', inputSchema: { type: 'object', properties: { subscriptionId: { type: 'string' } }, required: ['subscriptionId'], additionalProperties: false } },
-  { name: 'list_watches', description: 'List subscriptions owned by this console binding.', inputSchema: { type: 'object', additionalProperties: false } },
+  { name: 'list_watches', description: 'List subscriptions owned by the configured host thread binding.', inputSchema: { type: 'object', additionalProperties: false } },
   { name: 'replay_run_events', description: 'Read bounded durable event facts, not full DSH results.', inputSchema: { type: 'object', properties: { cursor: { type: 'integer', minimum: 0 } }, additionalProperties: false } },
 ]
 

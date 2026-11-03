@@ -1,5 +1,7 @@
 # Event-driven wake: P0 source audit (2026-10-29)
 
+> **Current evidence note — 2026-11-03:** This file records the original source audit and its proposed gates. Later Codex 0.166 evidence verified distinct `_meta.threadId` values for two test threads; A/B marker queue admissions, busy rejection, exact-once durable-history visibility and reconnect persistence were exercised in one primary test thread. The busy-retention snapshot was missed because the probe queried the wrong queue-list field and remains unpassed. A separate P1 live restart recovery now passes; the original user root/main thread remains unvalidated. See [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md); do not rewrite the historical audit as if those later checks occurred on its original date.
+
 ## Baseline and isolation
 
 - Checkout: `5a2c9f5f1d47cb2bbaa64337cfddafe9c2363473`, package 0.2.19; clean before this report.

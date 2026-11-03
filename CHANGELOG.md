@@ -1,5 +1,11 @@
 # CHANGELOG
 
+## 0.2.20
+
+- Add opt-in wake for configured existing Codex daemon threads through Unix WebSocket attachment and atomic native queue admission, preserving thread permissions and daemon lifecycle.
+- Resolve wake destinations from host-authored MCP thread metadata. Keep original Relay tools and ordinary wait fallback when no binding is configured.
+- Reconcile delayed durable history without resubmitting an uncertain turn; retain a persistent worker, pause controls and rollback. See `EXISTING_CODEX_WAKE.md` for measured acceptance and remaining limits.
+
 ## 0.2.19
 
 ### 2026-10-18

@@ -117,6 +117,29 @@ test('P3 crash after preparing dispatch reconciles accepted history instead of r
   assert.equal((await f.store.read()).deliveries[0]?.state, 'acknowledged')
 })
 
+test('held uncertain acceptance recovers only on later positive history and never starts again', async () => {
+  const f = await fixture()
+  await f.watch(); await f.outbox.observe(run('needs_attention', 2), 'owner'); await f.outbox.setEnabled(true)
+  const host = new Host(); host.fail = true
+  const dispatcher = new WakeDispatcher(f.outbox, host)
+  await dispatcher.tick()
+  assert.equal((await f.store.read()).deliveries[0]?.state, 'held')
+  assert.equal(host.inputs.length, 1)
+
+  host.fail = false
+  host.recovery = { kind: 'not-accepted' }
+  await dispatcher.tick()
+  assert.equal((await f.store.read()).deliveries[0]?.state, 'held')
+  assert.equal(host.inputs.length, 1)
+
+  host.recovery = { kind: 'accepted', turnId: 'late-persisted-turn' }
+  host.completed = 'completed'
+  await dispatcher.tick()
+  assert.equal((await f.store.read()).deliveries[0]?.state, 'acknowledged')
+  assert.equal((await f.store.read()).deliveries[0]?.turnId, 'late-persisted-turn')
+  assert.equal(host.inputs.length, 1)
+})
+
 test('P3 only definitive non-admission retries with bounded backoff and dead letter', async () => {
   const f = await fixture()
   await f.watch()

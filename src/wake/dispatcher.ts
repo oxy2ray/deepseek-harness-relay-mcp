@@ -136,15 +136,22 @@ export class WakeDispatcher {
   }
 
   private async recover(binding: WakeBinding): Promise<void> {
-    const rows = (await this.outbox.store.read()).deliveries.filter(d => d.bindingId === binding.bindingId && d.state === 'dispatching')
+    const rows = (await this.outbox.store.read()).deliveries.filter(d => d.bindingId === binding.bindingId
+      && (d.state === 'dispatching' || (d.state === 'held' && d.error === 'uncertain-acceptance')))
     for (const row of rows) {
       let result: Recovery
       try { result = await this.host.reconcile(binding, row.dispatchId) }
       catch { result = { kind: 'unknown' } }
       await this.outbox.store.transaction(state => {
         const current = state.deliveries.find(d => d.dispatchId === row.dispatchId)!
+        if (row.state === 'held') {
+          if (result.kind === 'accepted') {
+            current.state = 'delivered'; current.turnId = result.turnId; current.error = null
+          }
+          return
+        }
         if (result.kind === 'accepted') {
-          current.state = 'delivered'; current.turnId = result.turnId
+          current.state = 'delivered'; current.turnId = result.turnId; current.error = null
         } else if (result.kind === 'not-accepted') this.retry(current)
         else { current.state = 'held'; current.error = 'uncertain-acceptance' }
       })

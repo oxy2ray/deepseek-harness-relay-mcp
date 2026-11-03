@@ -1,5 +1,7 @@
 # Explicit use of an existing loopback Relay
 
+> **Workflow note — 2026-11-03:** The instructions below describe sharing Relay with the managed-console workflow. A separate opt-in now supports selected existing Codex daemon threads; it uses the current local Relay descriptor but has a distinct config and worker lifecycle. See [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md). The existing-thread config is not enabled by default, and evidence on dedicated threads does not yet validate the original user root/main thread.
+
 The wake console defaults to `relayMode: "isolated"`. In that mode, a configured Relay descriptor and its token file must both resolve inside `testRoot`, and port 3080 is rejected.
 
 To deliberately use an existing authorized Relay, set `relayMode` to `"existing-authorized"` and provide both `relayDescriptor` and its exact `relayAuthorityId`. The descriptor is still parsed by the native Relay descriptor reader, which requires loopback HTTP URLs and a token file path. This mode permits the descriptor and token file paths to resolve outside `testRoot`, including the existing loopback Relay on port 3080. It never reads token contents in console configuration validation; the native proxy reads authentication when it connects.

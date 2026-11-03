@@ -526,8 +526,8 @@ pnpm pack --dry-run
 
 MIT
 
-## 实验性持久唤醒（显式启用，受控控制台降级路径）
+## 持久唤醒（显式绑定现有 Codex 线程）
 
-当前 checkout 新增独立事件采集/调度器与受控 Codex 控制台。普通 Relay 入口保持原有行为；只有显式配置的 wake 代理增加持久监听工具。真实 DSH 结果已成功恢复独立的认证 Luna 测试线程，该线程未调用 wait_run。普通 remote TUI 验收仍未完成。共享 Host 的变更须符合用户授权的部署范围并保留回滚方案；启用 wake 本身不授予生产变更权限。
+标准代理可通过独立持久收集器，连接明确配置的现有 Codex daemon 线程。专用 remote TUI 已实际收到同线程自动事件并用 `get_run` 核对 DSH 结果，中间没有调用 `wait_run`；原始用户主对话的验收另行记录。配置、实测证据和回滚见 [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md)。没有显式配置时保留原来的等待流程，受控控制台也保留为独立可选入口。启用唤醒不扩大任务权限。
 
 启动和日常操作见 [快速使用](EVENT_WAKE_QUICKSTART.md)。配置、控制与回滚见 [实现说明](EVENT_WAKE_IMPLEMENTATION.md)，复用现有服务见 [显式配置](EVENT_WAKE_SHARED_RELAY.md)，证据见 [验证记录](EVENT_WAKE_VALIDATION.md)。支持独立认证或只读挂载当前认证；准备脚本不会复制凭据。

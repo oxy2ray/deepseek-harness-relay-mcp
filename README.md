@@ -517,8 +517,8 @@ pnpm pack --dry-run
 
 MIT
 
-## Experimental durable wake (opt-in, managed-console fallback)
+## Durable wake (opt-in existing Codex threads)
 
-This checkout includes an independent wake collector/dispatcher and a managed Codex console. Ordinary Relay entry points remain unchanged; only the explicitly configured wake proxy adds durable watch tools. Real DSH results have resumed a private authenticated Luna thread with zero model wait_run calls. Ordinary remote-TUI acceptance remains open. Do not upgrade or restart a shared Host as part of this experiment.
+The standard proxy can attach a separate persistent worker to explicitly configured existing Codex daemon threads. A real dedicated remote TUI has received an automatic same-thread event and verified a DSH result without `wait_run`; original-main-thread acceptance is still tracked separately. Setup, measured evidence and rollback are in [EXISTING_CODEX_WAKE.md](EXISTING_CODEX_WAKE.md). Without the opt-in config, the original wait workflow remains available. The managed console is also retained as an optional separate workflow.
 
 Start with the [quick start](EVENT_WAKE_QUICKSTART.md). See [setup, controls and rollback](EVENT_WAKE_IMPLEMENTATION.md), [explicit existing-service opt-ins](EVENT_WAKE_SHARED_RELAY.md) and [validation evidence](EVENT_WAKE_VALIDATION.md). Private authentication or read-only current-runtime mounts are supported; the helpers do not copy credentials.

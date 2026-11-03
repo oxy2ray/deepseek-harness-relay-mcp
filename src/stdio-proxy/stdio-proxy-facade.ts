@@ -11,6 +11,7 @@ import { callWakeTool, wakeTools, WakeCursorExpiredError } from '../wake/index.j
 import type { RunSnapshot } from '../types.js'
 
 const principalPattern = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,63}$/u
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu
 const relayVersion = typeof __DSH_RELAY_VERSION__ === 'string' ? __DSH_RELAY_VERSION__ : 'development'
 const doctorTool = {
   name: 'doctor',
@@ -33,7 +34,7 @@ export class StdioProxyFacade {
     { name: 'dsh-relay-proxy', version: relayVersion },
     {
       capabilities: { tools: { listChanged: true } },
-      instructions: 'Local-first stdio proxy to the embedded Harness Relay authority. Use doctor to verify connectivity even if cached tool schemas are listed. Discover live models, presets and providerQuotas before dispatch. Ordinary stdio does not enable wake. Only when this proxy offers watch_run and every delegated run returns structured acknowledged=true plus hostMayConcludeTurn=true may this host turn end awaiting events. This is not task completion: retrieve get_run on wake and verify assistantText. Otherwise continue native wait_run to terminal. Never use a shell RPC client.',
+      instructions: 'Local-first stdio proxy to the embedded Harness Relay authority. Use doctor to verify connectivity even if cached tool schemas are listed. Discover live models, presets and providerQuotas before dispatch. When wake tools are offered, they are bound to the configured host thread. Only when watch_run returns structured acknowledged=true plus hostMayConcludeTurn=true may this host turn end awaiting events. This is not task completion: retrieve get_run on wake and verify assistantText. Otherwise continue native wait_run to terminal. Never use a shell RPC client.',
     },
   )
   private readonly diagnostics: ProxyDiagnosticsFacade
@@ -47,6 +48,7 @@ export class StdioProxyFacade {
 
   constructor(private readonly config: StdioProxyConfig, dependencies: StdioProxyDependencies = {}) {
     if (!principalPattern.test(config.clientPrincipalId)) throw new Error('invalid DSH Relay client principal')
+    if (config.wake !== undefined && config.wakeByThread !== undefined) throw new Error('ambiguous DSH Relay wake binding configuration')
     this.productTools = createProductToolCatalog(config.maxTaskCharacters)
     this.diagnostics = new ProxyDiagnosticsFacade(config.descriptorFile, config.statusFile, dependencies)
     this.hostAutostart = dependencies.hostAutostart
@@ -58,7 +60,7 @@ export class StdioProxyFacade {
         )
         : null)
     this.local.setRequestHandler(ListToolsRequestSchema, request => this.listTools(request.params?.cursor))
-    this.local.setRequestHandler(CallToolRequestSchema, request => this.callTool(request.params.name, request.params.arguments))
+    this.local.setRequestHandler(CallToolRequestSchema, request => this.callTool(request.params.name, request.params.arguments, request.params._meta))
   }
 
   async connect(localTransport: Transport): Promise<void> {
@@ -80,27 +82,28 @@ export class StdioProxyFacade {
     const remote = this.remote
     if (remote === null) {
       this.beginRemoteRefresh()
-      return { tools: cursor === undefined ? [...await this.localToolCatalog(), ...(this.config.wake ? wakeTools : [])] : [] }
+      return { tools: cursor === undefined ? [...await this.localToolCatalog(), ...(this.hasWakeTools() ? wakeTools : [])] : [] }
     }
     try {
       const page = await remote.listTools(cursor === undefined ? undefined : { cursor }, { timeout: this.config.requestTimeoutMs })
       this.lastError = null
       return {
         tools: cursor === undefined
-          ? [doctorTool, ...page.tools.filter(tool => tool.name !== doctorTool.name && (!this.config.wake || !wakeTools.some(w => w.name === tool.name))), ...(this.config.wake ? wakeTools : [])]
+          ? [doctorTool, ...page.tools.filter(tool => tool.name !== doctorTool.name && (!this.hasWakeTools() || !wakeTools.some(w => w.name === tool.name))), ...(this.hasWakeTools() ? wakeTools : [])]
           : page.tools.filter(tool => tool.name !== doctorTool.name),
         ...(page.nextCursor === undefined ? {} : { nextCursor: page.nextCursor }),
       }
     } catch (error) {
       await this.invalidateRemote(this.diagnostics.remoteFailure(error))
-      return { tools: cursor === undefined ? await this.localToolCatalog() : [] }
+      return { tools: cursor === undefined ? [...await this.localToolCatalog(), ...(this.hasWakeTools() ? wakeTools : [])] : [] }
     }
   }
 
-  private async callTool(name: string, args: Record<string, unknown> | undefined): Promise<object> {
-    if (this.config.wake && wakeTools.some(tool => tool.name === name)) {
+  private async callTool(name: string, args: Record<string, unknown> | undefined, meta?: unknown): Promise<object> {
+    if (this.hasWakeTools() && wakeTools.some(tool => tool.name === name)) {
       try {
-        const result = await callWakeTool(this.config.wake, this.config.clientPrincipalId, name, args ?? {}, async runId => {
+        const context = await this.resolveWakeContext(meta)
+        const result = await callWakeTool(context, this.config.clientPrincipalId, name, args ?? {}, async runId => {
           const remote = await this.callTool('get_run', { runId }) as { isError?: boolean; structuredContent?: RunSnapshot }
           if (remote.isError || !remote.structuredContent) throw new Error('owned run unavailable')
           return remote.structuredContent
@@ -135,6 +138,25 @@ export class StdioProxyFacade {
       await this.invalidateRemote(routeFailure)
       return this.unavailableResult(name, routeFailure)
     }
+  }
+
+  private hasWakeTools(): boolean {
+    return this.config.wake !== undefined || this.config.wakeByThread !== undefined
+  }
+
+  private async resolveWakeContext(meta: unknown) {
+    if (this.config.wake !== undefined) return this.config.wake
+    const outbox = this.config.wakeByThread?.outbox
+    if (!outbox) throw new Error('wake is not configured')
+    const threadId = (meta !== null && typeof meta === 'object' && !Array.isArray(meta))
+      ? (meta as Record<string, unknown>).threadId
+      : undefined
+    if (typeof threadId !== 'string' || !uuidPattern.test(threadId)) throw new Error('host thread binding metadata required')
+    const state = await outbox.store.read()
+    const matches = state.bindings.filter(binding => binding.threadId === threadId
+      && binding.principal === this.config.clientPrincipalId && binding.enabled && binding.expiresAt > outbox.now())
+    if (matches.length !== 1) throw new Error('host thread has no unique enabled wake binding')
+    return { outbox, bindingId: matches[0]!.bindingId }
   }
 
   private ensureRemote(): Promise<boolean> {
